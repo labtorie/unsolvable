@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Unsolvable — лаборатория экономики</title>
+  <link rel="stylesheet" href="src/ui/style.css">
+</head>
+<body>
+  <div id="app">
+    <header id="timebar">
+      <div class="brand">Unsolvable</div>
+      <div id="date" class="date">—</div>
+      <button id="play" class="btn primary" title="Пауза / пуск (пробел)">Пуск</button>
+      <div id="speeds" class="seg" role="group" aria-label="Скорость"></div>
+      <span id="source" class="dim small"></span>
+      <span id="error" class="err" hidden></span>
+      <span class="grow"></span>
+      <div id="snapbar" class="row gap"></div>
+    </header>
+    <main id="main">
+      <aside id="levers" class="col"><h2 class="col-h">Рычаги</h2></aside>
+      <section id="center" class="col-center">
+        <div id="street" class="street-box"></div>
+        <div id="bottom" class="bottom-box">
+          <div id="center-tabs" class="tabs"></div>
+          <div id="center-panes" class="center-panes"></div>
+        </div>
+      </section>
+      <aside id="right" class="col-right">
+        <div id="status" class="status-scroll"></div>
+        <div id="feed" class="feed-box"></div>
+      </aside>
+    </main>
+  </div>
+  <noscript>Нужен JavaScript.</noscript>
+  <script type="module" src="src/ui/main.js"></script>
+</body>
+</html>
