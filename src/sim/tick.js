@@ -13,8 +13,12 @@ import { applyOwnership, entryAndStructure, cleanup } from './systems/structure.
 import { householdFinance } from './systems/households.js';
 import { demography } from './systems/demography.js';
 import { computeStats } from './systems/stats.js';
+import { techPhase } from './systems/tech.js';
+import { financePhase } from './systems/finance.js';
+import { petitionsPhase, phenomenaPhase } from './systems/society.js';
 import { NEEDS } from './schema.js';
 import { clamp } from './systems/util.js';
+import { beginMonth, endMonth } from './neighbors.js';
 
 const CARRY0 = { secEff: 0.8, eduCov: 0.7, avgHealth: 0.8, povertyShare: 0.1, techGrowth: 0.001, nxEMA: 0, medWealth: 1000, pollIdx: 0.4, unemployment: 0.06 };
 
@@ -66,7 +70,7 @@ function buildCtx(world) {
     const mStar = (calib.rb0 || 0) * calib.pStar * (calib.gdp0 || 1) * (calib.techIdx || 1);
     ctx.creditMult = 1;
   }
-  ctx.cutK = 1 - clamp(gov.cut || 0, 0, 0.9);
+  ctx.cutK = 1 - clamp(gov.cut || 0, 0, 0.98);
   ctx.plannedCount = 0;
   for (const g of GOODS) if (pol.industry[g].planned) ctx.plannedCount++;
   return ctx;
@@ -87,7 +91,17 @@ function satDemand(world, ctx) {
   ctx.satDemand = d;
 }
 
+/** Один месяц страны вместе с соседями: клиринг цен и заказов → тик страны → тики соседей → зеркальные проводки на границе. */
 export function tick(world) {
+  const linked = world.neighbors && world.neighbors.length;
+  if (linked) beginMonth(world);
+  tickCore(world);
+  if (linked) endMonth(world);
+  return world;
+}
+
+/** Один месяц одной страны (соседи в нём не участвуют: у них своя заграница — через world.abroad.plan). */
+export function tickCore(world) {
   world.t++;
   for (const k of FLOW_KINDS) world.flows[k] = 0;
   const ctx = buildCtx(world);
@@ -118,6 +132,8 @@ export function tick(world) {
   ctx.indUtil = {};
   for (const g of GOODS) { let o = 0, c = 0; for (const f of ctx.by[g]) if (f.alive) { o += f.orders; c += f.capacity; } ctx.indUtil[g] = c > 0 ? o / c : 0; }
   firmFinance(world, ctx);
+  techPhase(world, ctx);       // вторая волна: исследования, лицензии, внедрение, платформы, переобучение
+  financePhase(world, ctx);    // вторая волна: оценка фирм, вложения фирм друг в друга, кредиты клиентам, залоги, обвалы
   bankPayout(world, ctx);
   governmentSpending(world, ctx);
   householdFinance(world, ctx);
@@ -132,6 +148,10 @@ export function tick(world) {
   world.bank.defRate = (world.bank.defRate || 0) * 0.97 + (world.bank.loans > 0 ? ctx.defaultsNow / world.bank.loans : 0);
   computeStats(world, ctx);
   governmentBooks(world, ctx);
+  if (!world.lite) {
+    petitionsPhase(world, ctx);  // вторая волна: обращения к власти
+    phenomenaPhase(world, ctx);  // вторая волна: журнал явлений
+  }
   cleanup(world, ctx);
   return world;
 }

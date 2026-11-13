@@ -11,7 +11,7 @@ const SEEDS = [1, 2, 3];
 const mean = a => a.reduce((s, x) => s + x, 0) / Math.max(1, a.length);
 
 function runPreset(id, seed) {
-  const w = newGame({ seed, preset: 'industrial' });
+  const w = newGame({ seed, preset: 'industrial', mail: false, neighbors: [] })   // эталон меряет политику, а не игнорирование писем;
   applyPreset(w, id);
   const acc = { u: [], pov: [], crime: [], shadow: [], gdp: [], gini: [], hhi: [], ws: [], corr: [], inv: [], sh: [], rent: [] };
   const cpi = [];

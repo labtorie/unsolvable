@@ -22,16 +22,30 @@ function importAllowed(world, ctx, g) {
   return world.abroad.worldPrice[g] > 0;
 }
 
+/**
+ * Во сколько раз импортёры настойчивее обычного. Вес импорта на рынке привязан к мощностям местных продавцов, поэтому когда они вымирают,
+ * вместе с ними «вымирает» и импорт, а дефицит остаётся навсегда (и тянет за собой всех, кто покупает это сырьё). Если товара на рынке не хватает,
+ * зарубежные поставщики занимают освободившееся место: чем больше нехватка, тем выше их доля. Только в связанном мире (там у заграницы есть
+ * собственные запасы и ограничение на дефицит торговли); у одинокой страны заграница — внешний процесс.
+ */
+export function importPull(world, g) {
+  if (!world.abroad.plan) return 1;
+  const k = world.assumptions.shortageImport ?? 1;
+  return 1 + k * 8 * clamp((world.markets[g].shortage || 0) - 0.03, 0, 1);
+}
+
 /** Цены импорта и допуск (до планирования фирм). */
 export function prepTrade(world, ctx) {
   const pol = world.policies;
   ctx.impPrice = {};
   ctx.impAllowed = {};
   ctx.expParity = {};
+  // связанный мир (соседи): цены, пошлины и объёмы по странам-партнёрам заранее сводит клиринг (neighbors.js)
+  const plan = world.abroad.plan;
   for (const g of GOODS) {
     const ip = pol.industry[g];
     let ok = importAllowed(world, ctx, g);
-    const pI = ok ? world.abroad.worldPrice[g] * world.abroad.fx * (1 + ip.tariff) : 0;
+    const pI = ok ? world.abroad.worldPrice[g] * world.abroad.fx * (1 + (plan ? (plan.tEff[g] || 0) : ip.tariff)) : 0;
     // при потолке цены ниже импортной цены импортёры не продают
     if (ok && ip.priceCap > 0) {
       const avgUC = ctx.by[g].length ? ctx.by[g].reduce((a, f) => a + f.unitCost, 0) / ctx.by[g].length : 0;
@@ -39,7 +53,8 @@ export function prepTrade(world, ctx) {
     }
     ctx.impAllowed[g] = ok;
     const d = ip.exportDuty;
-    ctx.expParity[g] = IND[g].resource && IND[g].tradable && d < 0.98 && world.abroad.worldPrice[g] > 0 ? world.abroad.worldPrice[g] * world.abroad.fx * (1 - d) : 0;
+    const wpx = plan ? (plan.wpExp[g] || 0) : world.abroad.worldPrice[g];
+    ctx.expParity[g] = IND[g].resource && IND[g].tradable && d < 0.98 && wpx > 0 ? wpx * world.abroad.fx * (1 - d) : 0;
     ctx.impPrice[g] = ok ? pI : 0;
   }
 }
@@ -66,7 +81,7 @@ function sellerWeights(world, ctx, g, mk) {
   const st = world.ind[g];
   if (ctx.impAllowed[g]) {
     const pI = ctx.impPrice[g];
-    wImp = st.impK * capSum * Math.exp(-eps * (pI / pmean - 1));
+    wImp = st.impK * importPull(world, g) * capSum * Math.exp(-eps * (pI / pmean - 1));
     tot += wImp;
   }
   const lam = 1 - P.shareInertia;
@@ -241,9 +256,12 @@ export function runMarkets(world, ctx) {
     const ratio = (wp * world.abroad.fx) / (MK[g].quote * (1 + tau));
     exportQ[g] = world.ind[g].expBase * clamp(Math.pow(ratio, 2), 0, 4);
   }
+  // в связанном мире спрос заграницы — это заказы соседей, а не кривая
+  const linked = !!world.abroad.plan;
+  if (linked) for (const g of GOODS) exportQ[g] = IND[g].tradable && pol.industry[g].exportDuty < 0.98 && !(g === 'vice' && pol.vicePolicy === 'banned') ? (world.abroad.plan.expQ[g] || 0) : 0;
 
   // ── очистка рынков
-  const stats = { exportsValue: 0, importsValue: 0 };
+  const stats = { exportsValue: 0, importsValue: 0, exportDuty: 0 };
   for (const h of hh) h.needsMet = {};
   let blackTurnover = 0;
   const bmFrac = clamp(0.8 - 0.9 * ctx.secEff, 0.1, 0.9);
@@ -275,8 +293,23 @@ export function runMarkets(world, ctx) {
     let soldImp = 0;
     let R = D;
     const w = mk.s;
-    const impOn = mk.sImp > 0;
+    let impOn = mk.sImp > 0;
     const impLimit = D * (ip.tariff < 1 ? 1 : Math.min(0.6, 4 * mk.sImp + 0.03)); // запретительная пошлина: импорт только «на подхвате»
+    let Dd = D, expPre = 0;
+    if (linked) {
+      // связанный мир: экспорт по заказам соседей отгружается первым из запасов продавцов, импорт приходит по заказам клиринга
+      Dd = D - Dexp;
+      let av = 0;
+      for (let k = 0; k < ns; k++) av += avail[k];
+      if (Dexp > 0 && av > 0) {
+        expPre = Math.min(Dexp, 0.97 * av);
+        for (let k = 0; k < ns; k++) { const q = (expPre * avail[k]) / av; sold[k] += q; avail[k] -= q; }
+      }
+      for (let k = 0; k < ns; k++) sellers[k].orders += Dexp * w[k];
+      soldImp = ctx.impAllowed[g] ? Math.min(world.abroad.plan.impQ[g] || 0, 0.9 * Dd) : 0;
+      R = Dd - soldImp;
+      impOn = false;
+    }
     for (let round = 0; round < 4 && R > 1e-9; round++) {
       let Ws = impOn ? mk.sImp : 0;
       for (let k = 0; k < ns; k++) if (avail[k] > 1e-9) Ws += w[k];
@@ -286,13 +319,13 @@ export function runMarkets(world, ctx) {
         if (avail[k] <= 1e-9) continue;
         const q = Math.min(avail[k], (R * w[k]) / Ws);
         sold[k] += q; avail[k] -= q; given += q;
-        if (round === 0) sellers[k].orders += D * w[k];
+        if (round === 0) sellers[k].orders += Dd * w[k];
       }
       if (impOn) { const q = Math.min((R * mk.sImp) / Ws, Math.max(0, impLimit - soldImp)); soldImp += q; given += q; }
       R -= given;
     }
-    let delivered = D - R;
-    const fill = D > 1e-12 ? delivered / D : 1;
+    let delivered = linked ? (Dd - R) + expPre : D - R;
+    const fill = linked ? (Dd > 1e-12 ? (Dd - R) / Dd : 1) : (D > 1e-12 ? delivered / D : 1);
     let grossDom = 0;
     for (let k = 0; k < ns; k++) grossDom += sold[k] * sellers[k].price;
     const pI = ctx.impPrice[g] || 0;
@@ -385,13 +418,13 @@ export function runMarkets(world, ctx) {
     // экспорт
     let expCost = 0, expQ = 0, duty = 0;
     if (Dexp > 0) {
-      expQ = Dexp * fill;
+      expQ = linked ? expPre : Dexp * fill;
       expCost = expQ * pAvg;
       const d = ip.exportDuty;
       const tau = d / (1 - d);
       pay(DUMMY, world.abroad, pools.exp, expCost, 'exports');
       duty = expCost * tau;
-      if (duty > 0) pay(world, world.abroad, gov, duty, 'tariffs');
+      if (duty > 0) { pay(world, world.abroad, gov, duty, 'tariffs'); stats.exportDuty += duty; }
     }
 
     // выплаты из пулов продавцам
@@ -471,4 +504,5 @@ export function runMarkets(world, ctx) {
   ctx.tradeBalance = stats.exportsValue - stats.importsValue;
   ctx.exportsValue = stats.exportsValue;
   ctx.importsValue = stats.importsValue;
+  ctx.exportDuty = stats.exportDuty;
 }

@@ -3,6 +3,8 @@ import { createWorld, HISTORY_KEYS } from './schema.js';
 import { populate } from './init.js';            // ядро
 import { tick } from './tick.js';                // ядро
 import { analyze } from './analytics/index.js';  // аналитика
+import { ensureMail } from './mailbox.js';       // общество: обращения к власти
+import { createNeighbors, DEFAULT_NEIGHBORS } from './neighbors.js';   // соседние страны
 
 const HISTORY_LIMIT = 12 * 200;
 
@@ -24,10 +26,13 @@ function record(world) {
   }
 }
 
-/** Новая игра. opts — см. createWorld. */
+/** Новая игра. opts — см. createWorld; neighbors — id наборов рычагов соседей (по умолчанию минархия, плановая экономика, социал-демократия; [] — мир без соседей). */
 export function newGame(opts = {}) {
   const world = createWorld(opts);
   populate(world, opts);
+  ensureMail(world).enabled = opts.mail !== false;   // почта включена в игре; в голом createWorld выключена
+  const nb = opts.neighbors ?? DEFAULT_NEIGHBORS;
+  if (nb.length) createNeighbors(world, nb, opts);
   analyze(world);
   record(world);
   return world;

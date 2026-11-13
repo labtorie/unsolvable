@@ -129,6 +129,240 @@ function pushEvent(w, type, text) {
   if (w.events.length > 200) w.events.shift();
 }
 
+// ───────────── вторая волна: технологии, финансы, потоки, рынок труда (всё выдумано, экономики нет) ─────────────
+const TECH_NAMES = {
+  manual: ['Робот-грузчик', 'Беспилотный погрузчик'], clerical: ['Электронный делопроизводитель', 'Автосверка отчётов'],
+  service: ['Касса без кассира', 'Самообслуживание 2.0'], care: ['Диагност-бот', 'Дистанционный осмотр'],
+  engineer: ['Копилот-инженер', 'Автокодер'], manager: ['Юрист-нейросеть', 'Менеджер-планировщик'],
+  creative: ['Генератор идей', 'Автоисследователь'], official: ['Электронный чиновник', 'Портал без очередей'],
+};
+const PROD_NAMES = ['Ускоритель отдачи', 'Бережливая линия', 'Умный севооборот', 'Датчик на каждый болт'];
+const PRODUCT_NAMES = ['Гаджет «Ещё один»', 'Умный чайник-аналитик', 'Подписка на всё'];
+const PLATFORM_NAMES = ['Платформа «Всё рядом»', 'Маркетплейс «Комиссия»', 'Приложение «Подряд»'];
+const DRIFT = { manual: -0.01, clerical: -0.05, service: 0, care: 0.02, engineer: 0.04, manager: 0.02, creative: 0.03, official: 0 };
+
+const liveOf = (w, ind) => w.firms.filter(f => f.alive && (!ind || f.industry === ind));
+const biggest = (w, ind) => liveOf(w, ind).sort((a, b) => b.marketShare - a.marketShare || a.id - b.id);
+
+function newTech(w, o) {
+  const T = w.tech;
+  const owner = o.owner || null;
+  const t = {
+    id: T.nextId++, name: o.name, kind: o.kind, industry: o.industry, profession: o.profession ?? null,
+    cut: o.cut ?? 0, prodGain: o.prodGain ?? 0, ownerFirmId: owner ? owner.id : null,
+    origin: o.origin || (owner ? (owner.owner === 'foreign' ? 'foreign' : 'private') : 'state'),
+    bornT: w.t, patentUntil: o.open ? w.t : w.t + (w.policies.patentYears ?? 15) * 12,
+    fee: o.fee ?? 0.3, adopters: [], parentId: o.parentId ?? null,
+  };
+  T.list.push(t); T.count = T.list.length;
+  if (o.kind === 'platform' && owner) {
+    owner.platform = { industry: o.industry, users: 0.05, fee: 0.2 + 0.1 * rand(w), gig: Math.round(4 + rand(w) * 14) };
+  }
+  return t;
+}
+function newResearch(w, f) {
+  const inds = INDUSTRIES.filter(i => !['security', 'vice'].includes(i.id));
+  const ind = pick(w, inds);
+  const profs = Object.keys(ind.labor);
+  const prof = pick(w, profs);
+  f.research = { techKind: 'automation', industry: ind.id, profession: prof, progress: rand(w) * 0.3, spend: 2 + rand(w) * 6 };
+}
+function setGig(w, f, n) {
+  const pool = w.households.filter(h => h.status === 'employed' && (h.profession === 'service' || h.profession === 'manual'));
+  for (const h of pool.slice(0, n)) { h.status = 'gig'; h.platformId = f.id; }
+}
+
+function mockInit2(w) {
+  const M = w.mockState = { bubble: 0.05, pop: 0, base: 0, ring: [], wage0: {}, flowBase: {} };
+  // профессии: стартовые зарплаты
+  for (const p of PROFESSIONS) {
+    const hs = w.households.filter(h => h.profession === p.id && h.status === 'employed');
+    M.wage0[p.id] = hs.length ? hs.reduce((a, h) => a + h.wage, 0) / hs.length : 1;
+  }
+  const tech = biggest(w, 'tech'), ene = biggest(w, 'energy'), man = biggest(w, 'manufacturing'), fin = biggest(w, 'finance'), svc = biggest(w, 'services');
+  const T1 = tech[0], T2 = tech[1], T3 = tech[2], E1 = ene[0], M1 = man[0], F1 = fin[0];
+  if (T1) T1.owner = 'private';
+  if (T1 && svc.length) {                                   // платформа
+    newTech(w, { owner: T1, kind: 'platform', name: PLATFORM_NAMES[0], industry: 'services', fee: 0.22 });
+    setGig(w, T1, 26);
+    T1.platform.gig = 26; T1.platform.users = 0.18;
+  }
+  if (T2) newTech(w, { owner: T2, kind: 'automation', name: 'Электронный делопроизводитель', industry: 'finance', profession: 'clerical', cut: 0.4, fee: 0.3 });
+  newTech(w, { owner: null, origin: 'foreign', kind: 'automation', name: 'Робот-грузчик', industry: 'manufacturing', profession: 'manual', cut: 0.35 });
+  newTech(w, { owner: null, kind: 'productivity', name: 'Умный севооборот', industry: 'agri', prodGain: 0.15, open: true });
+  if (T3) newTech(w, { owner: T3, kind: 'product', name: 'Подписка на всё', industry: 'services', prodGain: 0 });
+  if (T1) newTech(w, { owner: T1, kind: 'gpt', name: 'Универсальный ИИ «Оракул»', industry: '*', cut: 0.1, prodGain: 0.04, fee: 0.15 });
+  for (const f of [T1, T2, T3, M1].filter(Boolean)) newResearch(w, f);
+  // кольцо: энергетика → IT → промышленность → энергетика + кредиты клиентам
+  const link = (a, b, share) => { if (!a || !b || a === b) return; a.stakes[b.id] = share; b.stakeHolders[a.id] = true; };
+  link(E1, T1, 0.22); link(T1, M1, 0.15); link(M1, E1, 0.09); link(T1, T3, 0.35); link(F1, T2, 0.12);
+  if (E1 && T1) E1.vendorLoans[T1.id] = E1.capital * 0.4;
+  if (T1 && T2) T1.vendorLoans[T2.id] = T1.capital * 0.25;
+  M.ring = [E1, T1, M1, T2].filter(Boolean).map(f => f.id);
+}
+
+function addLink(w) {
+  const live = liveOf(w).filter(f => f.owner !== 'state');
+  if (live.length < 2) return;
+  const a = live[Math.floor(rand(w) * live.length)], b = live[Math.floor(rand(w) * live.length)];
+  if (a === b || a.stakes[b.id]) return;
+  if (rand(w) < 0.7) { a.stakes[b.id] = Math.round((0.05 + rand(w) * 0.2) * 100) / 100; b.stakeHolders[a.id] = true; }
+  else a.vendorLoans[b.id] = a.capital * (0.05 + rand(w) * 0.2);
+}
+
+function mockLabor(w) {
+  const M = w.mockState;
+  const by = {};
+  for (const p of PROFESSIONS) by[p.id] = { employed: 0, unemployed: 0, avgWage: 0 };
+  for (const h of w.households) {
+    const r = by[h.profession];
+    if (!r) continue;
+    if (h.status === 'employed' || h.status === 'gig') { r.employed++; r.avgWage += h.wage; }
+    else if (h.status === 'unemployed') r.unemployed++;
+  }
+  for (const p of PROFESSIONS) {
+    const r = by[p.id];
+    if (r.employed) r.avgWage /= r.employed;
+    const w0 = M.wage0[p.id] || 1;
+    w.labor[p.id] = { wage: r.avgWage, w0, rel: r.avgWage / w0, employed: r.employed, unemployed: r.unemployed, vacancies: Math.round(r.employed * 0.02), u: r.employed + r.unemployed ? r.unemployed / (r.employed + r.unemployed) : 0 };
+  }
+  w.stats.employmentByProfession = by;
+}
+
+function mockFlows(w) {
+  const g = w.stats.gdp, FL = w.flows;
+  const F = {
+    wages: 0.52, consumption: 0.62, b2b: 0.9, dividends: 0.09, investment: 0.2,
+    tax_income: 0.07, tax_payroll: 0.06, tax_corp: 0.03, tax_vat: 0.05, tax_excise: 0.01, tax_inheritance: 0.002, tax_dividend: 0.008, tax_rent: 0.01, tariffs: 0.005,
+    transfers_pension: 0.045, transfers_unemployment: 0.008, transfers_poverty: 0.01, gov_wages: 0.09, gov_procurement: 0.07, subsidies: 0.01, corruption: 0.006,
+    imports: 0.2, exports: 0.21, capital_flight: 0.004, loans: 0.06, repayments: 0.055, interest: 0.012, emission: 0.003, gov_borrowing: 0.012, gov_interest: 0.01,
+    acquisitions: 0.004, research: 0.008, tech_licenses: 0.006, platform_fees: 0.005,
+  };
+  const bub = w.mockState?.bubble ?? 0;
+  F.equity_purchases = 0.02 * (0.3 + bub); F.vendor_loans = 0.006 * (0.3 + bub); F.vendor_repayments = 0.004 * (0.3 + bub);
+  if (w.mockState?.pop > 0) F.margin_calls = 0.02;
+  for (const k of Object.keys(FL)) FL[k] = F[k] ? g * F[k] * (1 + 0.04 * randn(w)) : 0;
+  const gov = w.gov, rev = {}, sp = {};
+  let r = 0, s = 0;
+  for (const k of Object.keys(F)) {
+    if (k.startsWith('tax_') || k === 'tariffs') { rev[k] = FL[k]; r += FL[k]; }
+    if (k.startsWith('transfers_') || ['gov_wages', 'gov_procurement', 'subsidies', 'corruption', 'gov_interest'].includes(k)) { sp[k] = FL[k]; s += FL[k]; }
+  }
+  gov.revenueByKind = rev; gov.spendingByKind = sp;
+  gov.revenue = r; gov.spending = s; gov.balance = r - s;
+}
+
+function mockStep2(w) {
+  const M = w.mockState; if (!M) return;
+  const alive = new Set(w.firms.filter(f => f.alive).map(f => f.id));
+  for (const f of w.firms) {
+    for (const k of Object.keys(f.stakes)) if (!alive.has(+k)) delete f.stakes[k];
+    for (const k of Object.keys(f.stakeHolders)) if (!alive.has(+k)) delete f.stakeHolders[k];
+    for (const k of Object.keys(f.vendorLoans)) if (!alive.has(+k)) delete f.vendorLoans[k];
+    if (!f.alive) { f.platform = null; f.research = null; }
+  }
+  const T = w.tech;
+  // исследования → новые технологии
+  let spend = 0;
+  for (const f of liveOf(w)) {
+    if (!f.research || T.list.length >= 24) continue;
+    spend += f.research.spend;
+    f.research.progress += 0.012 + 0.03 * rand(w) * (w.assumptions?.researchLuck ?? 1);
+    if (f.research.progress >= 1) {
+      const r = f.research, profL = TECH_NAMES[r.profession] || ['Автоматика'];
+      const kindRoll = rand(w);
+      const kind = f.industry === 'tech' && kindRoll < 0.12 ? 'platform' : kindRoll < 0.25 ? 'productivity' : kindRoll < 0.35 ? 'product' : 'automation';
+      const nm = kind === 'automation' ? pick(w, profL) : kind === 'productivity' ? pick(w, PROD_NAMES) : kind === 'product' ? pick(w, PRODUCT_NAMES) : pick(w, PLATFORM_NAMES);
+      const alreadyPlatform = !!f.platform;
+      newTech(w, { owner: f, kind: kind === 'platform' && alreadyPlatform ? 'product' : kind, name: nm, industry: r.industry, profession: kind === 'automation' ? r.profession : null,
+        cut: 0.15 + rand(w) * 0.45, prodGain: 0.05 + rand(w) * 0.15, fee: 0.2 + rand(w) * 0.2 });
+      pushEvent(w, 'tech', `«${f.name}» изобрела: ${nm}. Конкуренты уже изучают, как это не покупать.`);
+      newResearch(w, f);
+    }
+  }
+  if (rand(w) < 0.03 && T.list.length < 16) {              // госнаука
+    newTech(w, { owner: null, kind: 'productivity', name: pick(w, PROD_NAMES), industry: pick(w, INDUSTRIES).id, prodGain: 0.1, open: rand(w) < 0.5 });
+  }
+  T.researchSpend = spend;
+  // внедрение
+  const dispNow = {};
+  for (const p of PROFESSIONS) dispNow[p.id] = 0;
+  for (const t of T.list) {
+    const pool = liveOf(w, t.industry === '*' ? null : t.industry).filter(f => f.id !== t.ownerFirmId && !t.adopters.includes(f.id));
+    for (const f of pool) {
+      const patent = w.t < t.patentUntil ? 0.6 : 1;
+      if (rand(w) < (0.01 + 0.12 * Math.sqrt(f.marketShare)) * patent) {
+        t.adopters.push(f.id);
+        (f.tech.licenses ||= []).push(t.id);
+        if (t.kind === 'automation' || t.kind === 'gpt') {
+          if (t.profession) {
+            f.tech.labor[t.profession] = Math.max(0.25, (f.tech.labor[t.profession] ?? 1) * (1 - t.cut));
+            const gone = (f.employees[t.profession] || 0) * t.cut;
+            dispNow[t.profession] += gone; T.displacedTotal += gone;
+          }
+        }
+        if (t.prodGain) f.tech.prod *= 1 + t.prodGain * 0.5;
+        f.tech.fees += t.fee * 0.5;
+      }
+    }
+    t.adopters = t.adopters.filter(id => alive.has(id));
+  }
+  for (const f of liveOf(w)) f.tech.fees *= 0.9;
+  for (const p of PROFESSIONS) {
+    const prev = T.byProfession[p.id] || { displaced: 0, targeted: 0, retraining: 0 };
+    const displaced = prev.displaced * (1 - 1 / 12) + dispNow[p.id];
+    T.byProfession[p.id] = {
+      displaced,
+      targeted: liveOf(w).filter(f => f.research?.profession === p.id).length,
+      retraining: Math.round(displaced * 0.4),
+    };
+  }
+  // платформа: рост числа подрядчиков
+  for (const f of liveOf(w)) if (f.platform) { f.platform.users = clamp(f.platform.users + 0.003 + 0.004 * randn(w), 0.01, 0.9); f.platform.gig = Math.max(0, Math.round(f.platform.gig * (1 + 0.01 * randn(w)))); }
+  // рынок труда
+  for (const h of w.households) {
+    if (h.status === 'employed' || h.status === 'gig') h.wage *= Math.exp(DRIFT[h.profession] / 12 + 0.004 * randn(w));
+  }
+  mockLabor(w);
+
+  // финансы
+  const F = w.finance;
+  if (M.pop > 0) { M.pop--; M.bubble = Math.max(0, M.bubble - 0.07); }
+  else {
+    M.bubble += 0.01 + 0.008 * rand(w);
+    if (M.bubble > 0.95 || (M.bubble > 0.55 && rand(w) < 0.025)) {
+      M.pop = 12; F.crashes++;
+      pushEvent(w, 'crash', 'Пузырь лопнул. Все обещали, что в этот раз всё иначе.');
+    }
+  }
+  F.sentiment = clamp(M.pop > 0 ? -0.5 - 0.3 * rand(w) : M.bubble * 1.5 - 0.35 + 0.05 * randn(w), -1, 1);
+  const ring = new Set(M.ring);
+  let total = 0, profit = 0, rev = 0, circ = 0;
+  for (const f of liveOf(w)) {
+    f.revenue = f.capital * 0.13 * (0.9 + 0.2 * rand(w));
+    const fund = f.capital * 1.2 + Math.max(0, f.profit) * 10;
+    const amp = (ring.has(f.id) ? 1.9 : 0.35) * (w.assumptions?.extrapolation ?? 1);
+    const target = fund * (1 + amp * M.bubble) * (M.pop > 0 ? 0.65 : 1);
+    f.fundamental = fund;
+    f.value = f.value > 0 ? f.value * 0.8 + target * 0.2 : target;
+    f.valueHist.push(f.value); if (f.valueHist.length > 24) f.valueHist.shift();
+    f.circularRevenue = ring.has(f.id) ? f.revenue * (0.25 + 0.6 * M.bubble) * (M.pop > 0 ? 0.4 : 1) : 0;
+    total += f.value; profit += Math.max(0, f.profit) * 12; rev += f.revenue; circ += f.circularRevenue;
+  }
+  if (!M.base) M.base = total || 1;
+  F.totalValue = total; F.index = 100 * total / M.base;
+  F.indexHist.push(F.index); if (F.indexHist.length > 36) F.indexHist.shift();
+  F.pe = total / Math.max(1, profit);
+  F.circularShare = rev > 0 ? circ / rev : 0;
+  F.marginDebt = total * 0.1 * (0.4 + M.bubble) * (M.pop > 0 ? 0.6 : 1);
+  const top = liveOf(w).sort((a, b) => b.value - a.value).slice(0, 6);
+  F.pensionFund.stakes = Object.fromEntries(top.map(f => [f.id, 0.03]));
+  F.pensionFund.cash = 20;
+  F.pensionFund.value = top.reduce((a, f) => a + f.value * 0.03, 0) + 20;
+  if (M.bubble > 0.3 && !M.pop && rand(w) < 0.05) addLink(w);
+  w.tech.count = w.tech.list.length;
+}
+
 export function newGame(opts = {}) {
   const w = createWorld(opts);
   const P = PRESETS[w.preset] || PRESETS.industrial;
@@ -162,7 +396,11 @@ export function newGame(opts = {}) {
   Object.assign(w.gov, { debt: P.gdp * 6, corruption: 0.2, shadowShare: 0.12, balance: 0 });
   w.abroad.fx = 1;
   w.moneySupply = P.gdp * 3;
+  for (const h of w.households) if (h.status !== 'employed') h.wage = 0;
   recompute(w);
+  mockInit2(w);
+  mockFlows(w);
+  mockStep2(w);
   w.regime.compass = { x: 0.1, y: -0.2 };
   updateRegime(w);
   pushEvent(w, 'info', 'Страна основана. Законодатель, всё в ваших руках. Удачи: она пригодится.');
@@ -230,7 +468,7 @@ export function step(w) {
   s.top1WealthShare = clamp(s.top1WealthShare + 0.002 * randn(w), 0.02, 0.8);
   s.povertyRate = clamp(s.povertyRate + 0.004 * randn(w), 0, 0.8);
   s.tradeBalance += 0.5 * randn(w);
-  g.balance = s.gdp * (-0.01 + 0.01 * randn(w));
+  mockFlows(w);
   g.debt = Math.max(0, g.debt - g.balance);
   g.corruption = clamp(g.corruption + 0.004 * randn(w), 0, 1);
   g.shadowShare = clamp(g.shadowShare + 0.004 * randn(w), 0, 0.8);
@@ -240,6 +478,7 @@ export function step(w) {
   c.x = clamp(c.x + 0.02 * randn(w), -1, 1);
   c.y = clamp(c.y + 0.02 * randn(w), -1, 1);
   recompute(w);
+  mockStep2(w);
   updateRegime(w);
   if (rand(w) < 0.05) pushEvent(w, 'flavor', pick(w, FLAVOR));
   if (rand(w) < 0.01) {

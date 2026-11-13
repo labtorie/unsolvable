@@ -7,15 +7,13 @@ import { IND, GOODS, P, effOwnership } from './params.js';
 import { baseMarkup, laborNeed, headcount } from './core.js';
 import { clamp, addEvent, safePay, fmt } from './util.js';
 import { creditRoom, borrow } from './firms.js';
+import { ownersOf, setHolding, addHolding, clearHoldings, payOwners, dilute, payFtt, priceOf } from './ownership.js';
+import { bailoutFirm, onFirmClosed } from './finance.js';
 
 const q = n => '«' + n + '»';
 const plural = (n, a, b, c) => { const m = n % 100, d = n % 10; return m > 10 && m < 15 ? c : d === 1 ? a : d >= 2 && d <= 4 ? b : c; };
 
-function takeShares(world, f) {
-  const hh = world.households;
-  for (const id in f.holders) { const h = hh[id - 1]; if (h) delete h.shares[f.id]; }
-  f.holders = {};
-}
+function takeShares(world, ctx, f) { clearHoldings(world, ctx, f); }
 
 function firmValue(f, ctx) {
   return Math.max(0.15 * f.capital * ctx.capUnit, f.capital * ctx.capUnit * 0.7 + f.cash - f.debt);
@@ -55,7 +53,7 @@ export function createFirm(world, ctx, g, opts) {
 
 /** Фирма меняет собственника на государство. */
 function nationalize(world, ctx, f) {
-  takeShares(world, f);
+  takeShares(world, ctx, f);
   f.owner = 'state';
 }
 
@@ -79,7 +77,7 @@ function privatize(world, ctx, f, workersEqual) {
     const a = safePay(world, h, gov, Math.min(value / top.length, h.cash * 0.6), 'acquisitions');
     paid.push(a); tot += a;
   }
-  takeShares(world, f);
+  takeShares(world, ctx, f);
   f.owner = 'private';
   top.forEach((h, i) => {
     const sh = tot > 0 ? paid[i] / tot : 1 / top.length;
@@ -104,7 +102,7 @@ export function applyOwnership(world, ctx) {
       addEvent(world, 'nationalization', `Отрасль «${ind.label}» национализирована: прежние владельцы получили благодарность и справку`, { industry: g });
     } else if (cur === 'coop') {
       for (const f of fs) {
-        if (f.owner === 'private') { takeShares(world, f); f.owner = 'coop'; }
+        if (f.owner === 'private') { takeShares(world, ctx, f); f.owner = 'coop'; }
         else if (f.owner === 'state') f.owner = 'coop';
       }
       world.shock.expropriation += 0.2;
@@ -138,18 +136,13 @@ export function closeFirm(world, ctx, f, reason) {
     bank.loans -= r; f.debt -= r;
   }
   if (f.debt > 0) { bank.loans -= f.debt; bank.defaults += f.debt; ctx.defaultsNow += f.debt; f.debt = 0; }
+  onFirmClosed(world, ctx, f);
   if (f.cash > 1e-9) {
-    let sum = 0;
-    for (const id in f.holders) { const h = hh[id - 1]; if (h && h.shares[f.id] > 0) sum += h.shares[f.id]; }
-    if (sum > 0) {
-      const c = f.cash;
-      for (const id in f.holders) { const h = hh[id - 1]; if (h && h.shares[f.id] > 0) { const a = (c * h.shares[f.id]) / sum; pay(world, f, h, a, 'dividends'); } }
-    } else {
-      pay(world, f, world.gov, f.cash, 'dividends');
-      ctx.stateDiv += 0;
-    }
+    // остаток денег — всем владельцам: домохозяйствам, другим фирмам, пенсионному фонду (в том числе проигравшим свои доли)
+    const paid = payOwners(world, ctx, f, f.cash, false);
+    if (!(paid > 0)) { pay(world, f, world.gov, f.cash, 'dividends'); ctx.stateDiv += 0; }
   }
-  takeShares(world, f);
+  takeShares(world, ctx, f);
   f.alive = false; f.deadT = world.t; f.output = 0; f.inventory = 0; f.employees = {};
   if (reason === 'bankrupt') {
     const n = ws.length;
@@ -163,6 +156,7 @@ function bankruptcies(world, ctx) {
     const val = f.capital * ctx.capUnit;
     if (world.t < 30 && f.bornT === 0) continue; // стартовые фирмы переживают период настройки
     const bad = f.lossMonths >= 10 || (f.debt > 2.5 * val && f.debt > 0) || (f.capital < 0.5 && f.output < 1e-6 && world.t - f.bornT > 6);
+    if (bad && bailoutFirm(world, ctx, f)) continue;
     if (bad) closeFirm(world, ctx, f, 'bankrupt');
   }
 }
@@ -249,26 +243,7 @@ export function entryAndStructure(world, ctx) {
         }
       }
     }
-    // слияния и поглощения
-    if (own !== 'coop' && fs.length >= 2 && rand(world) < 0.015 + 0.03 * clamp((pol.antitrustThreshold - 0.4) / 0.6, 0, 1) * (own === 'licensed' ? 2.2 : 1)) { // без антимонопольного закона поглощения идут вдвое-втрое чаще
-      const priv = fs.filter(f => f.owner === 'private');
-      if (priv.length >= 2) {
-        priv.sort((a, b) => firmValue(b, ctx) - firmValue(a, ctx));
-        const buyer = priv[0];
-        let target = null;
-        for (const f of priv) {
-          if (f === buyer) continue;
-          if (!target || f.profitMargin < target.profitMargin) target = f;
-        }
-        if (target && buyer.profitMargin > 0.02) {
-          const price = 1.35 * firmValue(target, ctx); // премия продавцу
-          const shareAfter = buyer.marketShare + target.marketShare;
-          if (shareAfter <= pol.antitrustThreshold + 1e-9 && firmValue(buyer, ctx) > 1.3 * price && rand(world) < 0.7) {
-            acquire(world, ctx, buyer, target, price, shareAfter);
-          }
-        }
-      }
-    }
+    // слияния и поглощения идут в меню фирм (finance.js): фирма сама сравнивает выгоду покупки с остальными вариантами
     // принудительное дробление
     if (pol.antitrustBreakup && own !== 'state') {
       for (const f of fs) {
@@ -281,41 +256,126 @@ export function entryAndStructure(world, ctx) {
   }
 }
 
-function acquire(world, ctx, buyer, target, price, shareAfter) {
-  const hh = world.households;
-  let sum = 0;
-  for (const id in target.holders) { const h = hh[id - 1]; if (h && h.shares[target.id] > 0) sum += h.shares[target.id]; }
-  // платёж: часть деньгами, остальное — акциями покупателя (обмен акциями)
-  const buffer = 1.3 * (buyer.wageBill + buyer.inputUsed + 20);
-  const cashPart = Math.max(0, Math.min(price * 0.6, buyer.cash - buffer));
-  const sharePart = price - cashPart;
-  const bEquity = Math.max(1, firmValue(buyer, ctx));
-  const phi = sum > 0 ? sharePart / (bEquity + sharePart) : 0;
-  if (sum > 0) {
-    if (phi > 0) for (const id in buyer.holders) { const o = hh[id - 1]; if (o && o.shares[buyer.id]) o.shares[buyer.id] *= 1 - phi; }
-    for (const id in target.holders) {
-      const h = hh[id - 1];
-      if (!(h && h.shares[target.id] > 0)) continue;
-      const frac = h.shares[target.id] / sum;
-      if (cashPart > 0) pay(world, buyer, h, cashPart * frac, 'acquisitions');
-      if (phi > 0) { h.shares[buyer.id] = (h.shares[buyer.id] || 0) + phi * frac; buyer.holders[h.id] = true; }
-    }
+/**
+ * Поглощение: покупатель платит всем владельцам цели (домохозяйствам, фирмам, пенсионному фонду) по цене price;
+ * домохозяйствам часть цены может быть выдана акциями покупателя (opts.stockFrac).
+ */
+export function acquire(world, ctx, buyer, target, price, opts = {}) {
+  const fin = world.finance;
+  const { list } = ownersOf(world, ctx, target);
+  let stockFrac = opts.stockFrac || 0;
+  const bOwners = ownersOf(world, ctx, buyer);
+  if (!(bOwners.list.some(x => x.k === 'h'))) stockFrac = 0;
+  let stockTotal = 0;
+  const rows = [];
+  for (const x of list) {
+    if (x.k === 'f' && x.o === buyer) continue;
+    const v = price * x.fr;
+    const st = x.k === 'h' ? v * stockFrac : 0;
+    stockTotal += st;
+    rows.push({ x, v, st });
   }
-  takeShares(world, target);
+  payFtt(world, buyer, price);
+  for (const r of rows) {
+    const cash = r.v - r.st;
+    if (!(cash > 0)) continue;
+    const pr = safePay(world, buyer, r.x.o, cash, 'acquisitions');
+    if (r.x.k === 'f') r.x.o.extra = (r.x.o.extra || 0) + 0; // продажа доли — реализация уже учтённой переоценки
+    if (r.x.k === 'h' && pr > 0 && r.x.o.status !== 'self') { /* выручка от продажи — не доход */ }
+  }
+  if (stockTotal > 0) {
+    const vb = Math.max(1, priceOf(buyer, ctx));
+    const phi = stockTotal / (vb + stockTotal);
+    dilute(world, ctx, buyer, phi);
+    buyer.raised += phi;
+    for (const r of rows) if (r.st > 0) addHolding('h', r.x.o, buyer, phi * r.st / stockTotal);
+  }
+  clearHoldings(world, ctx, target);
+  if (opts.subsidiary) {
+    // вертикальное поглощение: поставщик/клиент остаётся работать как дочерняя фирма на 100%
+    addHolding('f', buyer, target, 1);
+    target.parent = buyer.id;
+    fin.mergers++;
+    if (target.industry === 'tech' || buyer.industry === 'tech') fin.mergersTech++;
+    addEvent(world, 'merger', `${q(buyer.name)} скупила ${IND[buyer.industry].inputs[target.industry] > 0 ? 'поставщика' : 'клиента'} ${q(target.name)}: теперь торгует сама с собой и называет это синергией`, { buyer: buyer.id, target: target.id, kind: 'vertical' });
+    return;
+  }
   if (target.cash > 0) pay(world, target, buyer, target.cash, 'acquisitions');
+  buyer.reserve += Math.min(target.reserve, buyer.cash);
   buyer.capital += target.capital * 0.88; // издержки интеграции: часть активов теряется при слиянии
   buyer.debt += target.debt; target.debt = 0;
+  buyer.marginDebt += target.marginDebt; target.marginDebt = 0;
   buyer.inventory += target.inventory;
   for (const k in target.inputStock) buyer.inputStock[k] = (buyer.inputStock[k] || 0) + target.inputStock[k];
   for (const h of ctx.workers[target.id] || []) { if (h.employerId === target.id) h.employerId = buyer.id; }
   for (const p in target.employees) buyer.employees[p] = (buyer.employees[p] || 0) + target.employees[p];
   buyer.demandEMA += target.demandEMA;
   buyer.share += target.share;
-  buyer.marketShare = shareAfter;
+  buyer.marketShare = opts.shareAfter ?? Math.min(1, buyer.marketShare + target.marketShare);
   buyer.acquired.push(target.name, ...target.acquired);
+  // доли цели в других фирмах и взаимные обязательства переходят покупателю
+  for (const id in target.stakes) {
+    const b = ctx.F[id];
+    const fr = target.stakes[id];
+    delete target.stakes[id];
+    if (b) { delete b.stakeHolders[target.id]; if (b.parent === target.id) b.parent = buyer.id; if (b.alive && b !== buyer) addHolding('f', buyer, b, fr); else if (b.alive) renormAfter(world, ctx, b); }
+  }
+  for (const id in target.vendorLoans) {
+    const b = ctx.F[id];
+    const sum = target.vendorLoans[id];
+    if (b && b.alive && b !== buyer) { buyer.vendorLoans[id] = (buyer.vendorLoans[id] || 0) + sum; b.vendorDebt[buyer.id] = (b.vendorDebt[buyer.id] || 0) + (b.vendorDebt[target.id] || 0); }
+    if (b) delete b.vendorDebt[target.id];
+  }
+  target.vendorLoans = {};
+  for (const id in target.vendorDebt) {
+    const l = ctx.F[id];
+    const sum = target.vendorDebt[id];
+    if (l && l.alive && l !== buyer) { l.vendorLoans[buyer.id] = (l.vendorLoans[buyer.id] || 0) + sum; buyer.vendorDebt[id] = (buyer.vendorDebt[id] || 0) + sum; }
+    if (l) delete l.vendorLoans[target.id];
+  }
+  target.vendorDebt = {};
+  delete buyer.vendorDebt[buyer.id]; delete buyer.vendorLoans[buyer.id];
+  // доход и история выручки сливаются, чтобы покупка не выглядела как «рост выручки»
+  buyer.profitEMA += target.profitEMA;
+  {
+    const bh = buyer.revHist, th = target.revHist;
+    if (bh.length && th.length) {
+      for (let i = 0; i < bh.length; i++) {
+        const j = th.length - bh.length + i;
+        bh[i] += th[Math.max(0, j)];
+      }
+    }
+  }
+  // технологии и патенты поглощённой фирмы достаются покупателю (поля блока «Технологии» не меняем, только владельца в списке)
+  if (world.tech && Array.isArray(world.tech.list)) {
+    for (const t of world.tech.list) {
+      if (t.ownerFirmId === target.id) t.ownerFirmId = buyer.id;
+      if (Array.isArray(t.adopters)) {
+        const i = t.adopters.indexOf(target.id);
+        if (i >= 0) { t.adopters.splice(i, 1); if (!t.adopters.includes(buyer.id)) t.adopters.push(buyer.id); }
+      }
+    }
+    if (target.tech && Array.isArray(target.tech.licenses) && buyer.tech && Array.isArray(buyer.tech.licenses)) {
+      for (const l of target.tech.licenses) if (!buyer.tech.licenses.includes(l)) buyer.tech.licenses.push(l);
+    }
+  }
   target.alive = false; target.deadT = world.t; target.output = 0; target.inventory = 0; target.employees = {};
-  addEvent(world, 'merger', `Фирма ${q(buyer.name)} проглотила фирму ${q(target.name)}: доля рынка ${Math.round(shareAfter * 100)}%`, { buyer: buyer.id, target: target.id, share: shareAfter });
+  target.value = 0; target.opsValue = 0; target.reserve = 0; target.research = null;
+  fin.mergers++;
+  if (target.industry === 'tech' || buyer.industry === 'tech') fin.mergersTech++;
+  const sh = Math.round(buyer.marketShare * 100);
+  if (opts.kind === 'startup') {
+    fin.startupBuyouts++;
+    if (target.industry === 'tech') fin.startupBuyoutsTech++;
+    addEvent(world, 'merger', `${q(buyer.name)} купила стартап ${q(target.name)}, пока тот не вырос в конкурента: ${fmt(price)} за мечты`, { buyer: buyer.id, target: target.id, kind: 'startup' });
+  } else if (opts.kind === 'vertical') {
+    addEvent(world, 'merger', `${q(buyer.name)} скупила поставщика (или клиента) ${q(target.name)}: теперь торгует сама с собой`, { buyer: buyer.id, target: target.id, kind: 'vertical' });
+  } else {
+    addEvent(world, 'merger', `Фирма ${q(buyer.name)} проглотила фирму ${q(target.name)}: доля рынка ${sh}%`, { buyer: buyer.id, target: target.id, share: buyer.marketShare });
+  }
 }
+
+function renormAfter(world, ctx, b) { const { list, sum } = ownersOf(world, ctx, b); if (sum > 0 && Math.abs(sum - 1) > 1e-9) for (const x of list) setHolding(x.k, x.o, b, x.fr / sum); }
 
 function splitFirm(world, ctx, f) {
   const hh = world.households;
@@ -343,7 +403,30 @@ function splitFirm(world, ctx, f) {
   // работники и владельцы
   const ws = ctx.workers[f.id] || [];
   ws.forEach((h, i) => { if (i % 2) { h.employerId = n.id; n.employees[h.profession] = (n.employees[h.profession] || 0) + 1; f.employees[h.profession]--; } });
-  for (const id in f.holders) { const h = hh[id - 1]; if (h && h.shares[f.id] > 0) { h.shares[n.id] = h.shares[f.id]; n.holders[id] = true; } }
+  {
+    // владельцы (домохозяйства, фирмы, пенсионный фонд) получают доли в обеих половинах
+    const { list } = ownersOf(world, ctx, f);
+    for (const x of list) {
+      if (x.k === 'h') { x.o.shares[n.id] = x.fr; n.holders[x.o.id] = true; }
+      else { setHolding(x.k, x.o, n, x.fr); }
+    }
+    for (const id in f.stakes) {
+      const b = ctx.F[id];
+      if (!b) continue;
+      const half2 = f.stakes[id] * 0.5;
+      f.stakes[id] = half2; n.stakes[id] = half2; b.stakeHolders[n.id] = true;
+    }
+    n.profitEMA = half(f.profitEMA); f.profitEMA = half(f.profitEMA);
+    n.revHist = f.revHist.map(half); f.revHist = f.revHist.map(half);
+    n.valueHist = f.valueHist.map(half); f.valueHist = f.valueHist.map(half);
+    n.value = half(f.value); f.value = half(f.value);
+    n.opsValue = half(f.opsValue); f.opsValue = half(f.opsValue);
+    n.fundamental = half(f.fundamental); f.fundamental = half(f.fundamental);
+    n.fundOps = half(f.fundOps); f.fundOps = half(f.fundOps);
+    n.growth = f.growth;
+    n.reserve = half(f.reserve); f.reserve = half(f.reserve);
+    n.marginDebt = half(f.marginDebt); f.marginDebt = half(f.marginDebt);
+  }
   f.lastSplitT = world.t; n.lastSplitT = world.t;
   world.firms.push(n); ctx.by[g].push(n); ctx.F[n.id] = n;
   addEvent(world, 'breakup', `Фирма ${q(f.name)} принудительно разделена: у монополии появился брат-близнец ${q(n.name)}`, { firm: f.id, newFirm: n.id });

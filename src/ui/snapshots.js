@@ -1,5 +1,6 @@
 // Снимки, ветки, сравнение и диалог «Новая страна».
 import { el, fmtDate, openModal } from './util.js';
+import { POLICY_PRESETS } from '../sim/presets.js';
 import { app, saveSnapshot, restoreSnapshot, deleteSnapshot, deleteBranch, setCompare, newCountry, onChange } from './state.js';
 
 export const PRESET_LIST = [
@@ -52,7 +53,7 @@ export function createSnapshotUi(buttonsRoot) {
     }
     if (!pop.classList.contains('hidden')) fill();
   });
-  listBtn.textContent = 'Снимки (0)';
+  listBtn.textContent = `Снимки (${app.snapshots.length})`;
 
   function openNew() {
     let preset = app.lastOpts.preset;
@@ -62,15 +63,22 @@ export function createSnapshotUi(buttonsRoot) {
       return el('label', { class: 'preset' }, r, el('span', {}, el('b', { text: label }), el('small', { class: 'dim', text: desc })));
     });
     let m;
+    // соседи: до трёх стран с разным строем (набор рычагов из готовых); «нет» — страна живёт одна
+    const NB_DEFAULT = ['minarchy', 'planned', 'socdem'];
+    const prevNb = app.lastOpts.neighbors || NB_DEFAULT;
+    const nbSel = [0, 1, 2].map(i => el('select', { 'aria-label': 'Сосед ' + (i + 1) },
+      el('option', { value: '', text: 'нет соседа', selected: !prevNb[i] }),
+      ...POLICY_PRESETS.map(p => el('option', { value: p.id, text: p.label, selected: prevNb[i] === p.id }))));
     const go = el('button', { class: 'btn primary', text: 'Создать страну', onclick: () => {
       const sd = Math.floor(Number(seed.value));
-      newCountry({ preset, seed: Number.isFinite(sd) ? sd : 1 });
+      newCountry({ preset, seed: Number.isFinite(sd) ? sd : 1, neighbors: nbSel.map(s => s.value).filter(Boolean) });
       m.close();
     } });
     const dice = el('button', { class: 'btn small', text: 'Случайное', onclick: () => { seed.value = Math.floor(Math.random() * 1e6); } });
     m = openModal('Новая страна', el('div', { class: 'newgame' },
       el('div', { class: 'presets' }, ...opts),
       el('label', { class: 'row gap' }, 'Seed', seed, dice),
+      el('div', { class: 'nb-pick' }, el('div', { class: 'dim small', text: 'Соседи: считаются тем же движком, строй не меняют. Торговля, капитал, люди и технологии идут через границу.' }), ...nbSel),
       el('div', { class: 'dim small', text: 'Текущая страна будет заменена. Снимки останутся.' }),
       go));
   }

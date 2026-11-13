@@ -8,11 +8,15 @@ import { clamp, addEvent, safePay } from './util.js';
 import { incomeTax, avgMarginal } from './tax.js';
 import { skillFactor } from './labor.js';
 
-const REV_KINDS = ['tax_income', 'tax_payroll', 'tax_corp', 'tax_vat', 'tax_excise', 'tax_wealth', 'tax_inheritance', 'tax_dividend', 'tax_rent', 'tax_carbon', 'tariffs'];
-const SPEND_KINDS = ['transfers_pension', 'transfers_unemployment', 'transfers_ubi', 'transfers_poverty', 'gov_wages', 'gov_procurement', 'subsidies', 'gov_interest'];
+const REV_KINDS = ['tax_income', 'tax_payroll', 'tax_corp', 'tax_vat', 'tax_excise', 'tax_wealth', 'tax_inheritance', 'tax_dividend', 'tax_rent', 'tax_carbon', 'tariffs', 'robot_tax', 'ftt'];
+const SPEND_KINDS = ['transfers_pension', 'transfers_unemployment', 'transfers_ubi', 'transfers_poverty', 'gov_wages', 'gov_procurement', 'subsidies', 'gov_interest', 'automation_subsidy', 'retraining', 'bailouts'];
+
+/** Сколько иностранных денег страна реально может привлечь в этом месяце: на счёте abroad и, в связанном мире, у соседей на руках. */
+const foreignFunds = ab => (ab.plan ? Math.max(0, Math.min(ab.cash, ab.avail ?? 0)) : ab.cash);
 
 export function worldPrices(world, ctx) {
   const ab = world.abroad;
+  if (ab.plan) return;   // связанный мир: цены складываются из цен соседей (neighbors.js), а не из экзогенного процесса
   for (const g of GOODS) {
     if (!IND[g].tradable) continue;
     // мировые цены тоже растут на ~2% в год (мировая инфляция), иначе внутренняя инфляция выдавливает всех импортом
@@ -163,9 +167,9 @@ export function governmentFinance(world, ctx) {
       need -= got;
       // иностранные покупатели облигаций (если капитал не заперт)
       const ab = world.abroad;
-      if (need > 1e-6 && pol.capitalControls < 1 && ab.cash > 0) {
-        const a = Math.min(need, 0.5 * ab.cash * (1 - pol.capitalControls));
-        if (a > 0) { pay(world, ab, gov, a, 'gov_borrowing'); gov.debt += a; gov.debtAbroad = (gov.debtAbroad || 0) + a; need -= a; }
+      if (need > 1e-6 && pol.capitalControls < 1 && foreignFunds(ab) > 0) {
+        const a = Math.min(need, 0.5 * foreignFunds(ab) * (1 - pol.capitalControls));
+        if (a > 0) { pay(world, ab, gov, a, 'gov_borrowing'); gov.debt += a; gov.debtAbroad = (gov.debtAbroad || 0) + a; need -= a; if (ab.plan) ab.avail -= a; }
       }
       unmet = Math.max(0, need);
     }
@@ -200,7 +204,7 @@ export function governmentFinance(world, ctx) {
   }
   // нет денег и нет покупателей долга: расходы режутся (секвестр), новые деньги не появляются
   const outlayEst = Math.max(1, gov.spending || outlays);
-  if (unmet > 1e-6) gov.cut = clamp(Math.max(gov.cut || 0, unmet / outlayEst), 0, 0.9);
+  if (unmet > 1e-6) gov.cut = clamp(Math.max(gov.cut || 0, unmet / outlayEst), 0, 0.98);
   else gov.cut = (gov.cut || 0) * 0.6 < 0.01 ? 0 : (gov.cut || 0) * 0.6;
   if (gov.cut > 0.05 && world.t - (world.calib.lastCutEvent ?? -99) >= 6) {
     world.calib.lastCutEvent = world.t;
@@ -301,6 +305,7 @@ export function externalSector(world, ctx) {
   const ab = world.abroad;
   const hh = world.households;
   const gdpM = Math.max(1, ctx.gdpM);
+  ab.lastTrade = { imports: ctx.importsValue || 0, exports: ctx.exportsValue || 0, duty: ctx.exportDuty || 0 };   // для клиринга соседей
   // ── движение капитала: бегство капитала при худших, чем в базовом сценарии, условиях
   const pr = 1 - ctx.effPR;
   const push = 6 * pol.wealthTax + 0.5 * Math.max(0, pol.corpTax - 0.2) + 0.4 * Math.max(0, pol.dividendTax - 0.1) + 0.25 * Math.max(0, pol.inheritanceTax - 0.2)
@@ -316,16 +321,17 @@ export function externalSector(world, ctx) {
       }
     }
   }
-  if (ab.cash > 0 && push <= 0.1) {
+  if (foreignFunds(ab) > 0 && push <= 0.1) {
     // возврат капитала и иностранные вложения: чем больше денег накопилось за границей, тем охотнее они возвращаются
     const over = Math.max(0, ab.cash / (2 * gdpM) - 1);
-    const amt = ab.cash * clamp(0.03 + 0.3 * over, 0, 0.3) * (1 - 0.7 * pol.capitalControls);
+    const amt = foreignFunds(ab) * clamp(0.03 + 0.3 * over, 0, 0.3) * (1 - 0.7 * pol.capitalControls) * (ab.plan ? (pol.foreignInvestment === 'banned' ? 0 : pol.foreignInvestment === 'limited' ? 0.4 : 1) : 1);
     let cand = world.firms.filter(f => f.alive && f.owner === 'private' && f.util > 0.8);
     if (!cand.length) cand = world.firms.filter(f => f.alive && f.owner === 'private');
     if (amt > 0 && cand.length) {
       const each = amt / cand.length;
       for (const f of cand) pay(world, ab, f, each, 'investment');
       capNet += amt;
+      if (ab.plan) ab.avail -= amt;
     }
   }
   ctx.capitalNet = capNet; // отрицательное — отток
@@ -333,17 +339,36 @@ export function externalSector(world, ctx) {
   const nx = (ctx.tradeBalance + Math.min(0, capNet)) / gdpM;
   ctx.nxEMA = 0.6 * (ctx.nxEMA || 0) + 0.4 * nx;
   ab.nx = ctx.nxEMA;
-  if (pol.fxRegime === 'float') {
+  if (pol.fxRegime === 'float' || ab.pegBroken) {
     ab.peg = 0;
-    const lf = Math.log(ab.fx) + clamp(-0.3 * ctx.nxEMA, -0.025, 0.025) - 0.015 * Math.log(ab.fx);
-    ab.fx = clamp(Math.exp(lf), 0.5, 2.5);
+    let lf = Math.log(ab.fx) + clamp(-0.3 * ctx.nxEMA, -0.025, 0.025) - 0.015 * Math.log(ab.fx);
+    // связанный мир: номинальный курс следует за уровнем цен относительно соседей (паритет покупательной способности), а торговый баланс двигает
+    // только реальный курс (дефицит — реальное обесценивание, профицит — укрепление), причём в ограниченных пределах. Иначе дефицит гонит курс
+    // вверх без конца, импорт дорожает, цены растут вслед за курсом, дефицит не уходит — и так до гиперинфляции
+    const ref = ab.pppRef || 1;
+    if (ab.plan) {
+      ab.rer = clamp((ab.rer || 0) * 0.985 + clamp(-0.6 * ctx.nxEMA, -0.03, 0.03), -0.6, 0.6);
+      const target = Math.log(Math.max(0.05, ctx.cpi / ref)) + Math.log(ab.fxCal || 1) + ab.rer;
+      lf = Math.log(ab.fx) + 0.25 * (target - Math.log(ab.fx));
+      ab.fx = clamp(Math.exp(lf), 0.05, 1e7);
+    } else if (ab.pegBroken) {
+      // после слома привязки свободный курс догоняет внутренние цены (паритет покупательной способности): без этого импорт дешевел бы при любой инфляции
+      lf = Math.log(ab.fx) + clamp(-0.3 * ctx.nxEMA, -0.025, 0.025) + clamp(0.06 * (Math.log(Math.max(0.3, ctx.cpi)) - Math.log(ab.fx)), -0.02, 0.1);
+      ab.fx = clamp(Math.exp(lf), 0.5, 1e6);
+    } else ab.fx = clamp(Math.exp(lf), 0.5, 2.5);
+    if (pol.fxRegime === 'fixed') {
+      // курс отпущен после слома привязки: резервы копятся заново, и когда их хватает на полгода импорта при неотрицательном сальдо, власти снова фиксируют курс
+      ab.reserves += ctx.tradeBalance / ab.fx + capNet / ab.fx * 0.5;
+      if (ab.reserves > 6 * Math.max(1, ctx.importsValue / ab.fx) && ctx.nxEMA >= 0) { ab.pegBroken = false; ab.peg = ab.fx; }
+    }
   } else {
     if (!ab.peg) ab.peg = ab.fx;
     ab.fx = ab.peg;
     ab.reserves += ctx.tradeBalance / ab.fx + capNet / ab.fx * 0.5;
     if (ab.reserves < 0) {
-      ab.fx *= 1.4; ab.peg = ab.fx;
-      ab.reserves = 2 * Math.abs(ctx.importsValue || 1);
+      // резервы кончились: привязку не удержать, курс сначала обваливается на 40%, затем плавает, пока резервы не восстановятся
+      ab.fx *= 1.4; ab.peg = 0; ab.pegBroken = true;
+      ab.reserves = 2 * Math.abs(ctx.importsValue || 1) / ab.fx;
       addEvent(world, 'devaluation', 'Резервы кончились, и фиксированный курс устал быть фиксированным: валюта подешевела на 40%', { fx: ab.fx });
     }
   }
@@ -360,10 +385,16 @@ export function monetaryStabilizer(world, ctx) {
   // цена: инфляция ниже цели (дефляция) — стимул при любом мандате с целью по ценам; занятость — только при двойном мандате
   const gapP = Math.max(0, pol.inflationTarget - world.stats.inflation - 0.012);
   const gapU = pol.cbMandate === 'dual' ? Math.max(0, ctx.carry.unemployment - 0.08) : 0;
-  const gap = gapU + 1.0 * gapP;
+  // дефляция при перегретом рынке труда — от роста производительности, а не от нехватки денег: раздача денег в такой момент
+  // лишь раздувает спрос на труд, поэтому реакция на ценовой разрыв включается по мере появления безработицы
+  const slack = clamp((ctx.carry.unemployment - P.stabSlack0) / (P.stabSlack1 - P.stabSlack0), 0, 1);
+  const gap = gapU + 1.0 * gapP * slack;
   if (!(gap > 0)) return;
   const stance = clamp(1 - 12 * (pol.cbRate - 0.05), 0, 1.6);
-  const total = P.stabilizer * gap * ctx.avgWage * world.households.length * stance;
+  // центробанк с мандатом на цены не раздаёт деньги, когда инфляция уже далеко выше цели: иначе безработица от внешней причины
+  // (например, дешёвый импорт) запускает печать денег, цены растут, зарплаты и «пособие» за ними, и это не кончается
+  const brake = clamp(1 - Math.max(0, world.stats.inflation - pol.inflationTarget - 0.03) / 0.08, 0, 1);
+  const total = P.stabilizer * gap * ctx.avgWage * world.households.length * stance * brake;
   if (!(total > 0)) return;
   const rec = world.households.filter(h => h.netIncome < ctx.medWage * 0.9 && h.status !== 'retired');
   if (!rec.length) return;

@@ -53,12 +53,14 @@ export function computeStats(world, ctx) {
   let emp = 0, unemp = 0, selfN = 0, wsum = 0, wsumAll = 0;
   const wages = [];
   const byProf = {};
-  for (const p of PROFESSIONS) byProf[p.id] = { employed: 0, unemployed: 0, avgWage: 0 };
+  for (const p of PROFESSIONS) byProf[p.id] = { employed: 0, unemployed: 0, avgWage: 0, gig: 0 };
+  let gigN = 0;
   let svcSum = 0, secSum = 0, eduSum = 0, hSum = 0, pov = 0;
   for (const x of hh) {
     if (x.status === 'employed') { emp++; wages.push(x.wage); wsum += x.wage; byProf[x.profession].employed++; byProf[x.profession].avgWage += x.wage; }
     else if (x.status === 'unemployed') { unemp++; byProf[x.profession].unemployed++; }
     else if (x.status === 'self') selfN++;
+    else if (x.status === 'gig') { emp++; gigN++; wages.push(x.wage); wsum += x.wage; byProf[x.profession].employed++; byProf[x.profession].gig++; byProf[x.profession].avgWage += x.wage; }
     wsumAll += x.incomeBySource.wage;
     const nm = x.needsMet;
     svcSum += (nm.security ?? 0) + (nm.health ?? 0) + (nm.education ?? 0);
@@ -81,6 +83,7 @@ export function computeStats(world, ctx) {
   st.tradeBalance = ctx.tradeBalance || 0;
   st.population = N * P.popFactor;
   st.employmentByProfession = byProf;
+  st.gigShare = emp ? gigN / emp : 0;
 
   carry.secEff = secSum / N;
   carry.svcMet = svcSum / (3 * N);

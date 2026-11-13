@@ -1,5 +1,6 @@
 // Состояние приложения, выбор источника симуляции и игровой цикл.
 // Единственное место, где решается: настоящее ядро или мок.
+import { loadSaved, putSaved, deleteSaved } from './storage.js';
 
 export const app = {
   sim: null,            // { newGame, step, snapshot }
@@ -54,11 +55,20 @@ export async function init() {
     app.simName = 'мок';
     app.world = app.sim.newGame({ ...app.lastOpts });
   }
+  // Снимки и ветки из прошлых сессий (IndexedDB). Не ждём дольше 2 с и не падаем без хранилища.
+  try {
+    const saved = await Promise.race([loadSaved(), new Promise(r => setTimeout(() => r(null), 2000))]);
+    if (saved) {
+      app.snapshots = saved.snapshots.filter(s => s.world && typeof s.name === 'string');
+      app.branches = saved.branches.filter(b => b.history && typeof b.name === 'string');
+      uid = 1 + Math.max(0, ...app.snapshots.map(s => s.id), ...app.branches.map(b => b.id));
+    }
+  } catch (e) { console.warn('[Unsolvable] не удалось прочитать сохранённые снимки', e); }
   startLoop();
 }
 
 export function newCountry(opts) {
-  app.lastOpts = { preset: opts.preset, seed: opts.seed };
+  app.lastOpts = { preset: opts.preset, seed: opts.seed, ...(opts.neighbors ? { neighbors: opts.neighbors } : {}) };
   app.world = app.sim.newGame({ ...app.lastOpts });
   app.error = '';
   emit();
@@ -87,6 +97,7 @@ export function saveSnapshot(fmtName) {
   const w = app.world;
   const s = { id: uid++, name: fmtName(w.t), t: w.t, world: app.sim.snapshot(w) };
   app.snapshots.push(s);
+  putSaved('snapshots', s);
   emit();
   return s;
 }
@@ -95,10 +106,12 @@ export function restoreSnapshot(id, fmtName) {
   if (!s) return;
   const cur = app.world;
   if (cur && cur.t !== s.t && cur.history?.t?.length) {
-    app.branches.push({
+    const br = {
       id: uid++, t: cur.t, history: structuredClone(cur.history),
       name: `Ветка: ${fmtName(s.t)} → ${fmtName(cur.t)}`,
-    });
+    };
+    app.branches.push(br);
+    putSaved('branches', br);
   }
   app.world = app.sim.snapshot(s.world);
   app.running = false;
@@ -107,11 +120,13 @@ export function restoreSnapshot(id, fmtName) {
 }
 export function deleteSnapshot(id) {
   app.snapshots = app.snapshots.filter(s => s.id !== id);
+  deleteSaved('snapshots', id);
   if (app.compare?.id === id) app.compare = null;
   emit();
 }
 export function deleteBranch(id) {
   app.branches = app.branches.filter(s => s.id !== id);
+  deleteSaved('branches', id);
   if (app.compare?.id === id) app.compare = null;
   emit();
 }

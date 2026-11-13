@@ -2,6 +2,7 @@
 import { el, svg, setText, fmtPct, fmtDate, num, clamp } from './util.js';
 import { METRICS } from './metrics.js';
 import { makeSparkline, openBigChart } from './charts.js';
+import { createWhy } from './why.js';
 
 const C = 150, R = 64, TRAIL = 60;
 
@@ -38,6 +39,7 @@ function compass() {
 }
 
 export function createPanel(statusRoot, feedRoot) {
+  const why = createWhy();
   // Строй
   const label = el('div', { class: 'regime-label' });
   const defacto = el('div', { class: 'regime-defacto' });
@@ -54,8 +56,11 @@ export function createPanel(statusRoot, feedRoot) {
   const rows = METRICS.map(m => {
     const val = el('span', { class: 'm-val' });
     const spark = makeSparkline();
-    const row = el('button', { class: 'metric', title: 'Показать большой график', onclick: () => openBigChart(m.id) },
-      el('span', { class: 'm-name', text: m.label }), val, spark);
+    const q = el('button', { class: 'why-btn', text: '?', title: 'Почему?', 'aria-label': 'Почему: ' + m.label,
+      onclick: e => { e.stopPropagation(); why.toggle(m.id, m.label, e.currentTarget); } });
+    const row = el('div', { class: 'metric', role: 'button', tabindex: 0, title: 'Показать большой график', onclick: () => openBigChart(m.id),
+      onkeydown: e => { if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) { e.preventDefault(); openBigChart(m.id); } } },
+      el('span', { class: 'm-name', text: m.label }), val, spark, q);
     list.append(row);
     return { m, val, spark };
   });
@@ -90,6 +95,7 @@ export function createPanel(statusRoot, feedRoot) {
     const hs = world.history?.series || {};
     cp.update(num(rg.compass?.x), num(rg.compass?.y), hs.compassX || [], hs.compassY || []);
 
+    why.update(world);
     for (const r of rows) {
       let cur = r.m.cur(world);
       const series = r.m.series(world.history);

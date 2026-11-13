@@ -1,5 +1,5 @@
 // Общие мелочи интерфейса: DOM-помощники, форматирование, палитры, модальные окна.
-import { CLASSES } from '../sim/schema.js';
+import { CLASSES, PROFESSIONS, INDUSTRIES } from '../sim/schema.js';
 
 export const MONTHS = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
 
@@ -35,6 +35,48 @@ export const CLASS_COLORS = {
 export const OWNER_COLORS = { private: '#6fb3b0', state: '#cf7a5a', coop: '#b4c46a', foreign: '#a68fc4' };
 export const OWNER_LABELS = { private: 'частная', state: 'государственная', coop: 'кооператив', foreign: 'иностранная' };
 export const CLASS_LABELS = Object.fromEntries(CLASSES.map(c => [c.id, c.label]));
+
+export const PROF_LABELS = Object.fromEntries(PROFESSIONS.map(p => [p.id, p.label]));
+export const IND_LABELS = Object.fromEntries(INDUSTRIES.map(i => [i.id, i.label]));
+export const IND_COLORS = {
+  agri: '#86b560', mining: '#a8795a', energy: '#d9a441', manufacturing: '#6f86d8', construction: '#c2926a', services: '#cf7fa8',
+  finance: '#9b7bd1', tech: '#4aa3df', health: '#6fc2a5', education: '#b4c46a', security: '#8d98a6', vice: '#d65f4f',
+};
+export const TECH_KINDS = {
+  automation: 'автоматизация', productivity: 'рост отдачи', product: 'новый продукт', platform: 'платформа', gpt: 'общего назначения',
+};
+export const fmtSigned = (v, d = 1, suffix = '') => (v > 0 ? '+' : v < 0 ? '−' : '') + fmtNum(Math.abs(num(v)), d) + suffix;
+
+// Подсказка рядом с курсором; переживает перерисовку содержимого (ключ запоминается).
+export function makeTip(host) {
+  const tip = el('div', { class: 'chart-tip hidden tip-fixed' });
+  host.append(tip);
+  let key = null, lookup = null;
+  const hide = () => { key = null; tip.classList.add('hidden'); };
+  return {
+    el: tip,
+    bind(node, getKey, getLines) {
+      lookup = getLines;
+      node.addEventListener('mousemove', e => {
+        const k = getKey(e.target);
+        if (k == null) return hide();
+        key = k;
+        tip.classList.remove('hidden');
+        fill();
+        const r = host.getBoundingClientRect();
+        tip.style.left = Math.min(r.width - 230, e.clientX - r.left + 12) + 'px';
+        tip.style.top = Math.max(0, e.clientY - r.top + 14) + 'px';
+      });
+      node.addEventListener('mouseleave', hide);
+    },
+    refresh() { if (key != null) fill(); },
+  };
+  function fill() {
+    const lines = lookup(key);
+    if (!lines) return hide();
+    tip.replaceChildren(...lines.map((t, i) => el('div', { class: i ? 'dim' : '', text: t })));
+  }
+}
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 

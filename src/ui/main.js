@@ -6,12 +6,21 @@ import { createStreet } from './street.js';
 import { createMarket } from './market.js';
 import { createPanel } from './panel.js';
 import { createSnapshotUi } from './snapshots.js';
+import { createProfessions, recordProfessions } from './professions.js';
+import { createTechTab } from './techtab.js';
+import { createOwnership } from './ownership.js';
+import { createFlows } from './flows.js';
+import { createMail } from './mail.js';
+import { createJournal } from './journal.js';
+import { createNeighborsTab } from './neighbors.js';
+import { openAssumptions, changedAssumptions } from './assumptions.js';
 import { POLICY_PRESETS, PRESET_GROUPS, applyPreset } from '../sim/presets.js';
 
 const $ = id => document.getElementById(id);
 
 // Вкладки центральной области. Вторая волна добавит сюда «Потоки», «Почту» и т. д. через addCenterTab.
 const centerTabs = [];
+const tabRenders = [];   // [id, root, render]: перерисовываем только видимую вкладку
 function addCenterTab({ id, label, root, render, soon }) {
   const btn = el('button', { class: 'tab' + (soon ? ' soon' : ''), text: label, disabled: !!soon, title: soon ? 'Скоро' : label,
     onclick: () => select(id) });
@@ -52,10 +61,26 @@ async function boot() {
   const marketRender = createMarket(marketRoot);
   const panelRender = createPanel($('status'), $('feed'));
 
+  const mk = () => el('div', { class: 'pane-scroll' });
+  const flowsRoot = mk(), profRoot = mk(), techRoot = mk(), ownRoot = mk(), mailRoot = mk(), jrRoot = mk(), nbRoot = mk();
+  const flowsRender = createFlows(flowsRoot);
+  const profRender = createProfessions(profRoot);
+  const techRender = createTechTab(techRoot);
+  const ownRender = createOwnership(ownRoot);
+  const mailRender = createMail(mailRoot);
+  const jrRender = createJournal(jrRoot);
+  const nbRender = createNeighborsTab(nbRoot);
+  tabRenders.push(
+    ['flows', flowsRoot, flowsRender], ['professions', profRoot, profRender], ['tech', techRoot, techRender], ['ownership', ownRoot, ownRender], ['mail', mailRoot, mailRender], ['journal', jrRoot, jrRender], ['neighbors', nbRoot, nbRender]);
+
   addCenterTab({ id: 'market', label: 'Рынок', root: marketRoot });
-  for (const [id, label] of [['flows', 'Потоки'], ['mail', 'Почта'], ['professions', 'Профессии'], ['ownership', 'Кто кем владеет'], ['neighbors', 'Соседи']]) {
-    addCenterTab({ id, label, root: el('div'), soon: true });
-  }
+  addCenterTab({ id: 'flows', label: 'Потоки', root: flowsRoot });
+  addCenterTab({ id: 'professions', label: 'Профессии', root: profRoot });
+  addCenterTab({ id: 'tech', label: 'Технологии', root: techRoot });
+  addCenterTab({ id: 'ownership', label: 'Кто кем владеет', root: ownRoot });
+  const mailBtn = addCenterTab({ id: 'mail', label: 'Почта', root: mailRoot });
+  addCenterTab({ id: 'journal', label: 'Журнал', root: jrRoot });
+  addCenterTab({ id: 'neighbors', label: 'Соседи', root: nbRoot });
   select('market');
 
   createSnapshotUi($('snapbar'));
@@ -89,6 +114,23 @@ async function boot() {
   addRenderer(function renderStreet(w) { streetRender(w); });
   addRenderer(function renderMarket(w) { if (!marketRoot.hidden) marketRender(w); });
   addRenderer(function renderPanel(w) { panelRender(w); });
+  addRenderer(function renderTabs(w) {
+    recordProfessions(w);   // история зарплат копится, даже когда вкладка закрыта
+    for (const [, root, render] of tabRenders) if (!root.hidden) render(w);
+  });
+  addRenderer(function renderMailBadge(w) {
+    const n = w.mail?.inbox?.length || 0;
+    const label = n ? `Почта (${n})` : 'Почта';
+    if (mailBtn.textContent !== label) mailBtn.textContent = label;
+    mailBtn.classList.toggle('has-mail', n > 0);
+  });
+  const assump = $('assump');
+  assump.onclick = () => openAssumptions();
+  addRenderer(function renderAssump() {
+    const n = changedAssumptions();
+    setText(assump, n ? `Допущения (${n})` : 'Допущения');
+    assump.classList.toggle('on', n > 0);
+  });
 
   // для проверки из консоли
   globalThis.Unsolvable.step = stepOnce;

@@ -76,7 +76,7 @@ export const POLICY_PRESETS = [
       resourceRent: 0.8, rentDistribution: 'fund', carbonTax: 0.5, taxAdmin: 0.95,
       healthMode: 'state', healthBudget: 0.09, educationMode: 'state', educationBudget: 0.07, securityBudget: 0.02, infrastructureBudget: 0.035, scienceBudget: 0.03,
       pensionLevel: 0.6, unemploymentBenefit: 0.7, minIncomeGuarantee: 0.9, officialPay: 1.1,
-      minWage: 0, unionPower: 1, firingCost: 2, workWeek: 37, retirementAge: 66,
+      minWage: 0, unionPower: 0.9, firingCost: 3, workWeek: 37, retirementAge: 66,
       antitrustThreshold: 0.35, regulationBurden: 0.5, propertyRights: 0.95, vicePolicy: 'licensed',
       pressFreedom: 1, courtsIndependence: 0.95, repression: 0,
     },
@@ -156,11 +156,11 @@ export const POLICY_PRESETS = [
     set: {
       incomeTaxBrackets: flat(0.13), payrollTax: 0.3, corpTax: 0.8, vat: 0.2, exciseVice: 2, dividendTax: 0.8, inheritanceTax: 0.3, resourceRent: 0.95, taxAdmin: 0.9,
       healthMode: 'state', healthBudget: 0.05, educationMode: 'state', educationBudget: 0.065, securityBudget: 0.07, infrastructureBudget: 0.05, scienceBudget: 0.04,
-      pensionLevel: 0.4, unemploymentBenefit: 0, minIncomeGuarantee: 0.4, officialPay: 1.3,
+      pensionLevel: 0.5, unemploymentBenefit: 0, minIncomeGuarantee: 0.4, officialPay: 1.3,
       minWage: 0.6, unionPower: 0.2, firingCost: 12, workWeek: 41, retirementAge: 60,
       antitrustThreshold: 1, regulationBurden: 1, propertyRights: 0.1,
       cbMandate: 'none', deficitMonetization: 0.5, fxRegime: 'fixed', capitalControls: 1, bankReserve: 1,
-      elections: 'none', pressFreedom: 0.05, courtsIndependence: 0.1, strikeRight: false, emigrationAllowed: false, repression: 0.6,
+      elections: 'none', pressFreedom: 0.05, courtsIndependence: 0.1, strikeRight: false, emigrationAllowed: false, repression: 0.6, foreignInvestment: 'banned', immigration: 'closed',
     },
     industry: { [ALL]: { ownership: 'state', planned: true, tariff: 2 }, agri: { priceCap: 1 }, construction: { priceCap: 1 }, energy: { priceCap: 1 } } },
 
@@ -226,9 +226,9 @@ export const POLICY_PRESETS = [
       payrollTax: 0.15, corpTax: 0.35, vat: 0.03, inheritanceTax: 0.4, taxAdmin: 0.8,
       healthBudget: 0.03, educationMode: 'state', educationBudget: 0.045, infrastructureBudget: 0.06, scienceBudget: 0.02,
       pensionLevel: 0.25, unemploymentBenefit: 0.15, minIncomeGuarantee: 0.2,
-      minWage: 0.3, unionPower: 0.5, firingCost: 10, workWeek: 52,
+      minWage: 0.3, unionPower: 0.4, firingCost: 10, workWeek: 52,
       antitrustThreshold: 0.7, regulationBurden: 0.5, propertyRights: 0.9,
-      cbRate: 0.035, fxRegime: 'fixed', capitalControls: 0.7,
+      cbRate: 0.03, fxRegime: 'fixed', capitalControls: 0.7,
       pressFreedom: 0.8, courtsIndependence: 0.75,
     },
     industry: { [ALL]: { tariff: 0.2 }, manufacturing: { subsidy: 0.12, tariff: 0.4 }, tech: { subsidy: 0.15, tariff: 0.4 }, agri: { subsidy: 0.25, tariff: 0.8 }, finance: { ownership: 'licensed' } } },
@@ -249,7 +249,7 @@ export const POLICY_PRESETS = [
   { id: 'petrostate', group: 'countries', label: 'Нефтяная монархия Залива',
     note: 'Налогов нет, бензин почти даром, вопросов к власти тоже нет. Всё держится на одной трубе.',
     set: {
-      incomeTaxBrackets: flat(0), payrollTax: 0.1, corpTax: 0.2, vat: 0.05, dividendTax: 0, inheritanceTax: 0, resourceRent: 0.95, taxAdmin: 0.4,
+      incomeTaxBrackets: flat(0), payrollTax: 0.05, corpTax: 0.1, vat: 0.03, dividendTax: 0, inheritanceTax: 0, resourceRent: 0.95, taxAdmin: 0.4,
       healthMode: 'state', healthBudget: 0.04, educationMode: 'state', educationBudget: 0.05, securityBudget: 0.08, infrastructureBudget: 0.06, scienceBudget: 0.002,
       pensionLevel: 0.6, unemploymentBenefit: 0.3, minIncomeGuarantee: 0.6, ubi: 0.1, officialPay: 1.7,
       minWage: 0.3, unionPower: 0, firingCost: 1,
@@ -388,6 +388,7 @@ export function applyPreset(world, presetId) {
   const preset = POLICY_PRESETS.find(x => x.id === presetId);
   if (!preset) return false;
   const next = buildPolicies(preset);
+  next.tradeWith = world.policies.tradeWith || next.tradeWith;   // отношения с соседями — не часть набора рычагов
   for (const k of Object.keys(world.policies)) delete world.policies[k];
   Object.assign(world.policies, next);
   world.events.push({ t: world.t, type: 'preset', text: `Курс сменился: «${preset.label}». ${preset.note}` });

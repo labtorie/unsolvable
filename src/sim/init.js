@@ -1,16 +1,17 @@
 // Начальное население и фирмы. Старт должен быть близок к равновесию модели.
-import { INDUSTRIES, NEEDS, PROFESSIONS, makeHousehold, makeFirm, createWorld } from './schema.js';
+import { INDUSTRIES, NEEDS, PROFESSIONS, makeHousehold, makeFirm, createWorld, createPolicies } from './schema.js';
 import { tick } from './tick.js';
 import { rand, randNormal, randInt } from './rng.js';
 import { totalCash } from './ledger.js';
 import { firmName } from './names.js';
-import { IND, GOODS, P, PRESETS, PROF_WAGE, SKILLED, hazard } from './systems/params.js';
+import { IND, GOODS, P, PRESETS, PROF_WAGE, SKILLED, hazard, effOwnership } from './systems/params.js';
 import { baseMarkup, scaleMult, eff, laborNeed, headcount, envCommon } from './systems/core.js';
 import { clamp, median } from './systems/util.js';
 import { computeEnv } from './systems/core.js';
 import { entryBarrier, markupFor } from './systems/firms.js';
 import { unitCostEst } from './systems/core.js';
 
+const DEF_POL = createPolicies();
 const PROF_IDS = PROFESSIONS.map(p => p.id);
 
 // Выживаемость по возрасту (Гомпертц) — для стационарной возрастной структуры.
@@ -54,6 +55,7 @@ export function populate(world, opts = {}) {
   if (!opts.noCalibrate) {
     for (let pass = 0; pass < 4; pass++) {
       const w2 = createWorld({ seed: world.seed, preset });
+      if (world.hardBudget) w2.hardBudget = true;   // пробный мир калибруется по тем же правилам, что и игровой
       w2.policies = structuredClone(world.policies);
       buildWorld(w2, { ...opts, preset }, mult);
       const out0 = {}, ord = {};
@@ -180,7 +182,14 @@ function buildWorld(world, opts, mult) {
   for (const pn of pl.plans) {
     const ind = pn.ind;
     const f = makeFirm(world.nextFirmId++, ind.id);
-    f.name = firmName(world, ind.id, names); names.add(f.name);
+    // собственник по рычагам старта (как после applyOwnership): отличие от умолчания — «государство»/«план» → госфирмы, «кооператив» → артели,
+    // «смешанная» → крупнейшая фирма — «национальный чемпион» (иначе государство в первый же месяц откроет её само, за 3 капитала).
+    // Умолчание (в нём госрежим у охраны описывает полицию и суд) стартовое население не меняет.
+    const ipN = pol.industry[ind.id], ipD = DEF_POL.industry[ind.id];
+    const eo = effOwnership(ipN);
+    f.owner = effOwnership(ipD) === eo && !!ipN.planned === !!ipD.planned ? 'private'
+      : eo === 'state' || eo === 'coop' ? eo : eo === 'mixed' && !byInd[ind.id].length ? 'state' : 'private';
+    f.name = firmName(world, ind.id, names, f.owner); names.add(f.name);
     f.productivity = clamp(prodOf[ind.id] * (0.93 + 0.14 * rand(world)), 0.4, 2);
     f.capital = (pn.cap * ind.capitalPerUnit) / (f.productivity * pn.sm);
     f._cap = pn.cap; f._out = pn.out;
@@ -360,6 +369,7 @@ function buildWorld(world, opts, mult) {
   let selfPtr = 0;
   const smallInd = new Set(['agri', 'services', 'construction', 'vice']);
   for (const f of firms) {
+    if (f.owner !== 'private') continue;   // у государственных и кооперативных фирм нет частных акционеров
     const owners = [], fracs = [];
     if (smallInd.has(f.industry) && selfList.length) {
       const k = 2 + randInt(world, 3);

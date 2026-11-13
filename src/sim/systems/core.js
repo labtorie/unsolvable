@@ -57,7 +57,13 @@ export function scaleMult(f, world) {
 
 /** Множитель производительности фирмы (и труда, и капитала). */
 export function eff(f, world, ctx) {
-  return f.productivity * ctx.env[f.industry] * scaleMult(f, world) * ownerMult(f, world);
+  return f.productivity * (f.tech?.prod || 1) * ctx.env[f.industry] * scaleMult(f, world) * ownerMult(f, world);
+}
+
+/** Работников профессии p на 100 единиц выпуска у этой фирмы: рецепт отрасли × поправка от внедрённых технологий. */
+export function laborCoef(f, p) {
+  const m = f.tech?.labor?.[p];
+  return IND[f.industry].labor[p] * (m == null ? 1 : m);
 }
 
 export function capacity(f, world, ctx) {
@@ -69,7 +75,7 @@ export function capacity(f, world, ctx) {
 export function laborNeed(f, q, e) {
   const ind = IND[f.industry];
   const out = {};
-  for (const p in ind.labor) out[p] = (q * ind.labor[p]) / 100 / e;
+  for (const p in ind.labor) out[p] = (q * laborCoef(f, p)) / 100 / e;
   return out;
 }
 
@@ -91,8 +97,9 @@ export function unitCostEst(f, world, ctx) {
   for (const p in ind.labor) {
     let w = f.wageOffer[p] || (ctx.labWage[p] || 100);
     if (w < wf) w = wf;
-    const cont = (ind.labor[p] / 100 / e) * w * (1 + pol.payrollTax * ctx.cmp);
-    const n = headcount((q0 * ind.labor[p]) / 100 / e);
+    const lc = laborCoef(f, p);
+    const cont = (lc / 100 / e) * w * (1 + pol.payrollTax * ctx.cmp);
+    const n = headcount((q0 * lc) / 100 / e);
     // целые работники: у малых фирм реальные издержки выше «непрерывных»
     c += 0.5 * cont + 0.5 * (n * w * (1 + pol.payrollTax * ctx.cmp)) / q0;
   }

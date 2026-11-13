@@ -4,6 +4,7 @@ import { rand, randInt } from '../rng.js';
 import { IND, P, PROF_WAGE, SKILLED } from './params.js';
 import { PROF_IDS, laborNeed, headcount, eff } from './core.js';
 import { clamp, safePay } from './util.js';
+import { platformSuccession } from './tech.js';
 
 const SUBS = { care: ['service', 'clerical'], clerical: ['service', 'manager'], service: ['manual', 'clerical'], manual: ['service'], manager: ['clerical'], creative: ['clerical', 'service'], engineer: ['manager'] };
 
@@ -11,6 +12,7 @@ export function skillFactor(h) { return 0.7 + 0.6 * h.skill; }
 
 /** Занятость из состояния домохозяйств (источник истины — hh.employerId). */
 export function recount(world, ctx) {
+  if (!ctx.succ) { ctx.succ = 1; platformSuccession(world, ctx); }
   for (const f of world.firms) { f.employees = {}; }
   const workers = ctx.workers; // id фирмы → массив hh
   workers.length = 0;
@@ -27,7 +29,13 @@ export function recount(world, ctx) {
       (workers[f.id] || (workers[f.id] = [])).push(h);
     } else if (h.status === 'unemployed') {
       L[h.profession].unemployed++;
+    } else if (h.status === 'gig') {
+      // подрядчик платформы: на рынке труда считается занятым, но фирме не принадлежит
+      const pf = ctx.F[h.platformId];
+      if (!pf || !pf.alive || !pf.platform) { h.status = 'unemployed'; h.platformId = null; h.jobSearch = 0; L[h.profession].unemployed++; }
+      else L[h.profession].employed++;
     }
+    if (h.displacedT != null && (h.status === 'employed' || h.status === 'gig' || h.status === 'self' || h.status === 'retired')) h.displacedT = null;
   }
   ctx.officials = officials;
 }
@@ -52,13 +60,23 @@ export function adjustLabor(world, ctx) {
   const floor = ctx.floor;
   const uf = 1 + 0.2 * (pol.unionPower - 0.3) * A.unionBargaining * (pol.strikeRight ? 1 : 0.6);
 
-  // 1. переобучение
+  // 1. переобучение; госпрограмма (retrainingBudget, % ВВП в год) платит стипендию тем, кто в неё попал
+  let retrLeft = pol.retrainingBudget * ctx.gdpM;
+  const stipend = 0.5 * ctx.avgWage;
   for (const h of hh) {
     if (h.retrain) {
+      if (h.retrain.sub) {
+        if (retrLeft >= stipend && world.gov.cash > stipend) {
+          const a = safePay(world, world.gov, h, stipend, 'retraining');
+          h.incomeBySource.transfer += a; retrLeft -= a;
+        } else h.retrain.left += 0.5; // программа без денег замедляется
+      }
       h.retrain.left--;
       if (h.retrain.left <= 0) {
         h.profession = h.retrain.to;
         h.skill = clamp(h.skill * 0.7 + 0.12, 0.1, 0.9);
+        if (h.retrain.sub && SKILLED[h.retrain.to] > 0.5) h.skill = Math.max(h.skill, 0.5);
+        h.grad = h.retrain.sub ? world.t : null; // выпускники госпрограммы: службы занятости сводят их с работодателями
         h.retrain = null;
         h.jobSearch = 0;
       }
@@ -90,7 +108,9 @@ export function adjustLabor(world, ctx) {
   const raw = clamp(0.03 * Math.log(wTarget / ((calib.wbar || 1) * relMean)), -0.004, 0.006);
   // в спаде якорь не тянет зарплаты вверх (центробанк по ценам не борется с безработицей), вниз тянет всегда
   const slack = clamp(1 - (uA - 0.07) * 12, 0, 1);
-  const level = pol.cbMandate === 'none' ? 0 : (raw > 0 ? slack * raw : raw);
+  // при нехватке рук (вакансий больше 3% рабочей силы) якорь не сбивает зарплаты вниз: ослабевает и пропадает при 7%
+  const shortage = clamp((vA - 0.03) / 0.04, 0, 1);
+  const level = pol.cbMandate === 'none' ? 0 : (raw > 0 ? slack * raw : raw * (1 - shortage));
   calib.wbar = (calib.wbar || 1) * (1 + admin * (clamp(0.1 * (vA - 0.006) - 0.1 * Math.max(0, uA - 0.13), -0.003, 0.004) + money + level + (0.3 + 0.2 * clamp((infl - 0.01) / 0.04, 0, 1)) * infl) + ctx.techGrowth); // ожидания: при высокой инфляции цены гонятся друг за другом
   for (const p of PROF_IDS) {
     const lm = L[p];
@@ -123,8 +143,11 @@ export function adjustLabor(world, ctx) {
     const margin = f.profitMargin;
     const prevVac = f.vacancies || {};
     f.vacancies = {};
-    for (const p in ind.labor) {
-      const des = headcount(need[p]);
+    // вторая волна: сверх рецепта отрасли — инженеры исследований и внедрения, штат продуктов и платформ (f.tech.staff)
+    const extra = f.tech && f.tech.staff;
+    const profs = extra && Object.keys(extra).length ? Object.keys({ ...ind.labor, ...extra }) : Object.keys(ind.labor);
+    for (const p of profs) {
+      const des = headcount((need[p] || 0) + (extra && extra[p] || 0));
       const have = f.employees[p] || 0;
       // предложение зарплаты
       const share = have / (empTotal[p] + L[p].unemployed + 1);
@@ -141,6 +164,7 @@ export function adjustLabor(world, ctx) {
         // увольнение лишних (наименее квалифицированных)
         const list = (ctx.workers[f.id] || []).filter(h => h.profession === p).sort((a, b) => a.skill - b.skill);
         const n = have - des;
+        const tc = f.tech;
         for (let i = 0; i < n && i < list.length; i++) {
           const h = list[i];
           const sev = pol.firingCost * h.wage;
@@ -149,6 +173,12 @@ export function adjustLabor(world, ctx) {
           f.employees[p]--;
           L[p].employed--; L[p].unemployed++;
           ctx.firedNow++;
+          // увольнение из-за технологии: помечаем для статистики, обращений и переобучения
+          if (tc && tc.pend && tc.pend[p] > 0) {
+            tc.pend[p]--;
+            h.displacedT = world.t;
+            (ctx.techFired ||= {})[p] = (ctx.techFired[p] || 0) + 1;
+          }
         }
       } else if (des > have && f.lossMonths < 3) {
         f.vacancies[p] = des - have;
@@ -187,7 +217,8 @@ export function adjustLabor(world, ctx) {
     const vs = vac[p].map(f => ({ f, n: f.vacancies[p], w: f.wageOffer[p] })).sort((a, b) => b.w - a.w);
     let govN = p === 'official' ? govVac : 0;
     // случайный порядок, затем лучшие ищущие первыми ловят лучшие места
-    const active = seekers.filter(() => rand(world) < P.frictions).sort((a, b) => b.skill - a.skill);
+    const prio = h => h.skill + (h.grad != null && world.t - h.grad <= 6 ? 1 : 0);
+    const active = seekers.filter(() => rand(world) < P.frictions).sort((a, b) => prio(b) - prio(a));
     let vi = 0;
     for (const h of active) {
       const sf = skillFactor(h);
@@ -241,20 +272,41 @@ export function adjustLabor(world, ctx) {
   const access = ctx.eduAccess;
   const tightness = {};
   for (const p of PROF_IDS) tightness[p] = Math.max(0, (vacTotal[p] - L[p].unemployed) / (L[p].employed + L[p].unemployed + 1));
-  for (const h of hh) {
-    if (h.status !== 'unemployed' || h.retrain || h.jobSearch < 3 || h.age >= pol.retirementAge - 5) continue;
+  const inTr = {};
+  for (const p of PROF_IDS) inTr[p] = 0;
+  for (const h of hh) if (h.retrain) inTr[h.retrain.to]++;
+  // программа переобучения берёт вытесненных технологией первыми: бюджет не должен уходить на тех, кому профессию вернёт рынок
+  for (let pass = 0; pass < 2; pass++) for (const h of hh) {
+    if (h.status !== 'unemployed' || h.retrain || h.age >= pol.retirementAge - 5) continue;
+    // вытесненные технологией начинают раньше: профессия, где они работали, уже не вернётся
+    const disp = h.displacedT != null;
+    if (disp !== (pass === 0)) continue;
+    if (h.jobSearch < (disp ? 2 : 3)) continue;
     const lm = L[h.profession];
-    if (lm.u < 0.06 && h.jobSearch < 9) continue;
-    const pr = 0.05 * access * clamp((62 - h.age) / 40, 0.1, 1) * (h.cash > 8 * h.wage ? 1.5 : 1);
+    if (lm.u < 0.06 && h.jobSearch < 9 && !disp) continue;
+    const funded = retrLeft >= stipend && world.gov.cash > stipend;
+    const ageK = clamp((62 - h.age) / 40, 0.1, 1);
+    let pr = 0.05 * access * ageK * (h.cash > 8 * h.wage ? 1.5 : 1) * (disp ? 1.4 : 1) * (funded ? 2.4 : 1);
+    // у программы есть кураторы: вытесненных технологией они находят и записывают сами, не дожидаясь, пока человек решится
+    if (funded && disp) pr = Math.max(pr, 0.3 * ageK);
     if (rand(world) >= pr) continue;
     let best = null, bw = 0;
     for (const q of PROF_IDS) {
       if (q === h.profession || q === 'official') continue;
-      if (SKILLED[q] > 0.5 && h.skill < 0.55) continue;
-      const w = (0.02 + tightness[q] * 8) * (1 - L[q].u) * Math.sqrt(PROF_WAGE[q]);
+      // госпрограмма берёт и тех, кому квалификации не хватает, и доводит их до порога профессии (учёба при этом дольше)
+      if (SKILLED[q] > 0.5 && h.skill < (funded ? 0.35 : 0.55)) continue;
+      // программа предпочитает учить под открытые места: где есть вакансии, ещё не занятые идущими на курсы, выбор впятеро вероятнее
+      const open = funded && vacTotal[q] - inTr[q] >= 1 ? 5 : 1;
+      const w = (0.02 + tightness[q] * 8) * (1 - L[q].u) * Math.sqrt(PROF_WAGE[q]) * open;
       if (w > bw && rand(world) < 0.7) { bw = w; best = q; }
     }
-    if (best) h.retrain = { to: best, left: Math.round((10 + (SKILLED[best] ? 8 : 0)) / Math.max(0.3, access)) };
+    if (best) {
+      // старшим учиться дольше; программа сокращает срок
+      const ageF = 1 + Math.max(0, h.age - 40) / 40;
+      inTr[best]++;
+      h.retrain = { to: best, left: Math.round((10 + (SKILLED[best] ? 8 : 0)) / Math.max(0.3, access) * ageF * (funded ? 0.65 : 1)), sub: funded };
+      if (funded) retrLeft -= stipend;
+    }
   }
 
   for (const p of PROF_IDS) L[p].vacancies = vacTotal[p];

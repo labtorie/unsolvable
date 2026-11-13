@@ -38,7 +38,7 @@ test('пресеты: все ключи и значения допустимы',
 
 test('пресеты: каждый живёт 20 лет без NaN', () => {
   for (const p of POLICY_PRESETS) {
-    const w = newGame({ seed: 3 });
+    const w = newGame({ seed: 3, neighbors: [] });
     assert.ok(applyPreset(w, p.id));
     for (let m = 0; m < 240; m++) step(w);
     for (const k of ['gdp', 'gdpReal', 'cpi', 'unemployment', 'giniIncome']) assert.ok(Number.isFinite(w.stats[k]), `${p.id}: ${k}=${w.stats[k]}`);

@@ -12,9 +12,10 @@ const SPECIALIST_PROF = new Set(['care', 'engineer', 'manager', 'creative']);
 export const NOMENKLATURA_STATE_SHARE = 0.4;
 export const NOMENKLATURA_SKILL = 0.7;
 
-/** Оценка фирмы: капитал + деньги − долг, не ниже нуля. */
+/** Оценка фирмы: рыночная (f.value, с пузырём), иначе капитал + деньги − долг. Не ниже нуля. */
 function firmValue(f) {
   if (!f || f.alive === false) return 0;
+  if (Number.isFinite(f.value) && f.value > 0) return f.value;
   return Math.max(0, num(f.capital) + num(f.cash) - num(f.debt));
 }
 
@@ -41,11 +42,11 @@ export function classify(world, stateShare) {
   const buckets = {};
   for (let i = 0; i < n; i++) {
     const h = hhs[i];
-    let w = num(h.cash);
+    let w = num(h.cash) + num(h.bonds) - num(h.marginDebt);
     if (h.shares) for (const k in h.shares) w += num(h.shares[k]) * (values.get(+k) ?? values.get(k) ?? 0);
     wealth[i] = w;
     net[i] = num(h.netIncome);
-    if (h.status === 'employed' || h.status === 'self') (buckets[h.profession] ||= []).push(net[i]);
+    if (h.status === 'employed' || h.status === 'self' || h.status === 'gig') (buckets[h.profession] ||= []).push(net[i]);
   }
   const medNet = median(Array.from(net));
   const medProf = {};
@@ -63,6 +64,7 @@ export function classify(world, stateShare) {
 
     let cls;
     if (buffer && capDominant) cls = 'capitalists';
+    else if (h.status === 'gig' && !buffer) cls = 'precariat';   // подрядчик платформы: работа есть, гарантий нет (даже если дохода не хватает)
     else if (!buffer && (h.status === 'unemployed' && h.age < 65
       || (basket > 0 && net[i] < basket && h.status !== 'retired')
       || (basicMet !== null && basicMet < 0.5))) cls = 'destitute';

@@ -6,6 +6,7 @@ import { baseMarkup, capacity, eff, laborNeed, unitCostEst } from './core.js';
 import { clamp, safePay, addEvent } from './util.js';
 import { incomeTax, corpRate } from './tax.js';
 import { skillFactor } from './labor.js';
+import { payOwners } from './ownership.js';
 
 /** Высота входного барьера отрасли 0..1 (для наценки). */
 export function entryBarrier(world, ctx, g) {
@@ -100,7 +101,7 @@ export function payWages(world, ctx) {
     f.wageBill = bill;
     const need = bill * (1 + pol.payrollTax * cmp) * 1.02;
     if (f.cash < need) {
-      if (f.owner === 'state') pay(world, gov, f, need - f.cash, 'subsidies');
+      if (f.owner === 'state') pay(world, gov, f, (need - f.cash) * ctx.cutK, 'subsidies');   // мягкое бюджетное ограничение кончается вместе с казной
       else borrow(world, ctx, f, need - f.cash + 0.1 * bill);
     }
     const ratio = need > 0 ? Math.min(1, f.cash / need) : 1;
@@ -121,18 +122,27 @@ export function payWages(world, ctx) {
   }
 }
 
-export function creditRoom(world, ctx, f) {
-  if (f.owner === 'state') return 0;
-  const val = f.capital * ctx.capUnit;
-  const lim = 0.5 * val * (0.4 + 0.6 * ctx.effPR) - f.debt;
+/** Сколько ещё кредита может выдать банковская система вообще (потолок по денежной массе, резервам, ставке ЦБ и состоянию самого банка). */
+export function bankRoom(world) {
   const bank = world.bank;
-  // потолок кредитования: доля целевой денежной массы (банки не раздувают кредит выше нормы), ужесточается резервами
   const c = world.calib;
   const mStar = (c.rb0 || 0) * (c.pStar || 1) * (c.gdp0 || 1) * (c.techIdx || 1) * P.moneyNorm;
+  const crunch = world.finance?.bankCrunch || 0;
   const maxLoans = (1 - world.policies.bankReserve) * Math.max(0.3 * world.moneySupply, 0.75 * mStar) * clamp(1 - 4 * (world.policies.cbRate - 0.05), 0.4, 1.4);
-  const bankRoom = maxLoans - bank.loans;
+  return Math.max(0, maxLoans * (1 - 0.9 * crunch) - bank.loans);
+}
+
+export function creditRoom(world, ctx, f) {
+  if (f.owner === 'state') return 0;
+  const fin = world.finance;
+  const mh = fin?.moralHazard || 0, crunch = fin?.bankCrunch || 0;
+  // залог — мощности; у фирмы, которую рынок оценил выше, чем стоят её мощности, часть «лишней» оценки тоже принимается в залог
+  const capVal = f.capital * ctx.capUnit;
+  const val = capVal + 0.3 * Math.max(0, (f.opsValue || 0) - 1.3 * capVal);
+  const lim = 0.5 * val * (0.4 + 0.6 * ctx.effPR) * (1 + 0.35 * mh) * (1 - 0.8 * crunch) - f.debt;
+  const bankRoomNow = bankRoom(world);
   if (f.lossMonths >= 5) return 0;
-  return Math.max(0, Math.min(lim, bankRoom));
+  return Math.max(0, Math.min(lim, bankRoomNow));
 }
 
 export function borrow(world, ctx, f, amount) {
@@ -307,12 +317,12 @@ export function firmFinance(world, ctx) {
 
     // государственные фирмы: мягкое бюджетное ограничение; инвестиции в замещение и рост оплачивает бюджет
     if (f.owner === 'state') {
-      if (f.cash < 0.5 * buffer) pay(world, gov, f, 0.5 * buffer - f.cash, 'subsidies');
+      if (f.cash < 0.5 * buffer) pay(world, gov, f, (0.5 * buffer - f.cash) * ctx.cutK, 'subsidies');
       const repl = dl * f.capital * ctx.capUnit;
       const shortage = world.markets[g].shortage;
       const grow = shortage > 0.15 ? 0.003 * f.capital * ctx.capUnit * (ip.planned ? 1.5 : 0.8) : 0;
       const want = repl + grow;
-      if (f.cash < buffer + want) pay(world, gov, f, buffer + want - f.cash, 'subsidies');
+      if (f.cash < buffer + want) pay(world, gov, f, (buffer + want - f.cash) * ctx.cutK, 'subsidies');
       f.capexBudget = want;
       const ex = Math.max(0, f.cash - buffer - want);
       const rem = 0.8 * ex; // прибыль госпредприятий идёт в бюджет (при плане — это и есть главный доход казны)
@@ -323,14 +333,18 @@ export function firmFinance(world, ctx) {
     // долг: целевое плечо зависит от стоимости кредита; сверх цели гасим, ниже цели — занимаем
     const capVal = f.capital * ctx.capUnit;
     // банки подстраивают кредит под целевую денежную массу: M* = нормальные остатки × целевой уровень цен × реальный выпуск
-    const lev = 0.06 * clamp(1 - 5 * (bank.rate - 0.07), 0.2, 2.5) * (0.6 + 0.4 * ctx.effPR) * ctx.creditMult;
+    const lev = 0.06 * clamp(1 - 5 * (bank.rate - 0.07), 0.2, 2.5) * (0.6 + 0.4 * ctx.effPR) * ctx.creditMult
+      * (1 + 0.5 * (world.finance.moralHazard || 0)) * (1 - 0.4 * (world.finance.bankCrunch || 0));
     const dTarget = lev * capVal;
     if (f.debt > dTarget) {
       if (f.cash > buffer) repay(world, f, Math.min(f.debt - dTarget, 0.25 * (f.cash - buffer) + 0.1 * (f.debt - dTarget)));
     } else if (f.profitMargin > 0 && f.lossMonths === 0) {
       borrow(world, ctx, f, 0.08 * (dTarget - f.debt));
     }
-    let avail = Math.max(0, f.cash - buffer);
+    // деньги от выпуска акций лежат в резерве (под инвестиции и сделки); понемногу он «рассасывается» в обычную кассу
+    // резерв держится, только пока рынок оценивает фирму выше стоимости мощностей (q > 1); иначе деньги идут владельцам как раньше
+    if (f.reserve > 0) f.reserve = f.value > 1.2 * f.capital * ctx.capUnit ? Math.min(f.reserve * 0.95, f.cash) : 0;
+    let avail = Math.max(0, f.cash - buffer - f.reserve);
     // инвестиции: замещение + рост
     const repl = dl * f.capital * ctx.capUnit;
     let growth = 0;
@@ -339,12 +353,20 @@ export function firmFinance(world, ctx) {
       const gap = 0.2 * clamp(f.orders * 1.1 / cap - 1, 0, 0.06);
       growth = gap * f.capital * ctx.capUnit * taxFactor * Math.min(2, Math.pow(ctx.effPR / 0.63, 1.5 * A.lawlessCost)) * (f.owner === 'coop' ? 0.6 : 1);
     }
+    // рынок оценил фирму выше стоимости её мощностей (q > 1): привлечённые на выпуске акций деньги идут в расширение сверх спроса
+    if (f.reserve > 1 && f.value > 0 && f.lossMonths === 0) {
+      const gross = f.capital * ctx.capUnit;
+      const q = f.value / Math.max(1, gross);
+      if (q > 1.2) growth += Math.min(0.12 * f.reserve, 0.02 * gross * (q - 1.2)) * taxFactor;
+    }
     let want = repl + growth;
     if (want > avail && growth > 0 && f.profitMargin > 0.02) {
       avail += borrow(world, ctx, f, want - avail);
     }
-    f.capexBudget = Math.min(want, avail);
-    avail -= f.capexBudget;
+    f.capexBudget = Math.min(want, avail + f.reserve);
+    const fromReserve = Math.max(0, f.capexBudget - avail);
+    f.reserve = Math.max(0, f.reserve - fromReserve);
+    avail = Math.max(0, avail - f.capexBudget);
     // дивиденды
     let div = (f.owner === 'coop' ? 0.9 : 0.5) * avail;
     if (div > 1 && f.profitMargin > -0.02) payDividends(world, ctx, f, div);
@@ -372,19 +394,8 @@ function payDividends(world, ctx, f, amount) {
     }
     return;
   }
-  let sum = 0;
-  const hs = f.holders;
-  for (const id in hs) { const h = hh[id - 1]; const s = h && h.shares[f.id]; if (s > 0) sum += s; else delete hs[id]; }
-  if (!(sum > 0)) return;
-  const cmp = ctx.cmp;
-  for (const id in hs) {
-    const h = hh[id - 1];
-    const part = (amount * h.shares[f.id]) / sum;
-    pay(world, f, h, part, 'dividends');
-    const t = safePay(world, h, gov, pol.dividendTax * part * cmp, 'tax_dividend');
-    ctx.tax[h.id - 1] += t;
-    if (h.status === 'self') h.incomeBySource.business += part; else h.incomeBySource.capital += part;
-  }
+  // дивиденды получают все владельцы: домохозяйства, другие фирмы, пенсионный фонд
+  payOwners(world, ctx, f, amount, true);
 }
 
 /** Банк раздаёт накопленные процентные доходы финансовым фирмам (а если их нет — всем домохозяйствам поровну). */

@@ -10,6 +10,7 @@ import { wealthOf } from './households.js';
 function emigration(world, ctx) {
   const pol = world.policies;
   if (!pol.emigrationAllowed) return;
+  if (world.abroad.plan) return;   // связанный мир: люди переезжают к конкретным соседям (neighbors.js), а не «за границу вообще»
   const hh = world.households;
   // уезжают квалифицированные, если жизнь дома хуже, чем снаружи (покрытие базовых нужд, безработица, репрессии)
   const living = 1 - ctx.povertyShare;
@@ -21,7 +22,7 @@ function emigration(world, ctx) {
     const pi = p + 0.02 * Math.max(0, 0.5 - (h.satisfaction ?? 0.5)) * (pol.repression + 0.5);
     if (rand(world) >= pi) continue;
     if (h.cash > 0) pay(world, h, world.abroad, h.cash, 'capital_flight');
-    h.status = 'unemployed'; h.employerId = null; h.wage = 0; h.retrain = null;
+    h.status = 'unemployed'; h.employerId = null; h.wage = 0; h.retrain = null; h.platformId = null; h.displacedT = null;
     h.age = 22; h.skill = clamp(0.3 + 0.3 * rand(world), 0.1, 0.8); h.health = 0.85; h.jobSearch = 0;
     h.profession = rand(world) < 0.6 ? 'manual' : 'service';
     for (const id in h.shares) { const f = ctx.F[id]; if (f) delete f.holders[h.id]; }
@@ -43,7 +44,7 @@ export function demography(world, ctx) {
     // пенсионный статус
     if (h.age >= ret) {
       if (h.status !== 'retired') {
-        h.status = 'retired'; h.employerId = null; h.wage = 0; h.retrain = null;
+        h.status = 'retired'; h.employerId = null; h.wage = 0; h.retrain = null; h.platformId = null;
       }
     } else if (h.status === 'retired') {
       h.status = 'unemployed'; h.jobSearch = 0;
@@ -71,7 +72,7 @@ function replaceWithHeir(world, ctx, h) {
   const prevProf = h.profession;
   const parentSkill = h.skill;
   h.age = 20;
-  h.status = 'unemployed'; h.employerId = null; h.wage = 0; h.retrain = null; h.jobSearch = 0;
+  h.status = 'unemployed'; h.employerId = null; h.wage = 0; h.retrain = null; h.jobSearch = 0; h.platformId = null; h.displacedT = null;
   if (wasSelf && rand(world) < 0.6) { h.status = 'self'; const own = Object.keys(h.shares); h.employerId = own.length ? Number(own[0]) : null; }
   h.health = 0.85;
   // профессия: чаще как у родителя; образование и доход открывают квалифицированные
@@ -85,7 +86,10 @@ function replaceWithHeir(world, ctx, h) {
     for (const p of PROF_IDS) {
       if (p === 'official') continue;
       const lf = L[p].employed + L[p].unemployed + 1;
-      wt[p] = (L[p].employed + 1) * (1 + 6 * (L[p].vacancies || 0) / lf) * (1 - 0.5 * L[p].unemployed / lf);
+      // дети смотрят на спрос, зарплаты и на то, сколько людей в профессии вытеснили машины
+      const bp = world.tech && world.tech.byProfession[p];
+      const exposure = bp ? clamp(6 * bp.displaced / (L[p].employed + 1), 0, 0.6) : 0;
+      wt[p] = (L[p].employed + 1) * (1 + 6 * (L[p].vacancies || 0) / lf) * (1 - 0.5 * L[p].unemployed / lf) * Math.pow(clamp(L[p].rel || 1, 0.55, 2.2), 1.5) * (1 - exposure);
       tot += wt[p];
     }
     let r = rand(world) * tot;

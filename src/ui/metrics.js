@@ -24,7 +24,11 @@ export const METRICS = [
   { id: 'debtGdp', label: 'Госдолг / ВВП', series: debtGdp, fmt: v => fmtPct(v, 0), cur: w => (num(w.stats?.gdp) > 0 ? num(w.gov?.debt) / (w.stats.gdp * 12) : 0) },
   { id: 'corruption', label: 'Коррупция', series: h => S(h, 'corruption'), fmt: v => fmtPct(v, 0), cur: w => w.gov?.corruption },
   { id: 'shadow', label: 'Тень', series: h => S(h, 'shadowShare'), fmt: v => fmtPct(v, 0), cur: w => w.gov?.shadowShare },
+  { id: 'hhi', label: 'Концентрация рынков', series: h => S(h, 'avgHhi'), fmt: v => fmtNum(v, 2), cur: w => w.stats?.avgHhi },
   { id: 'fx', label: 'Курс', series: h => S(h, 'fx'), fmt: v => fmtNum(v, 2), cur: w => w.abroad?.fx },
+  // вторая волна: финансы
+  { id: 'stockIndex', label: 'Фондовый индекс', series: h => S(h, 'stockIndex'), fmt: v => fmtNum(v, 1), cur: w => w.finance?.index },
+  { id: 'circularShare', label: 'Круговая выручка', series: h => S(h, 'circularShare'), fmt: v => fmtPct(v, 1), cur: w => w.finance?.circularShare },
 ];
 export const metricById = id => METRICS.find(m => m.id === id) || METRICS[0];
 export { last };
